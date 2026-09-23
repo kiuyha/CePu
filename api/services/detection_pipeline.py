@@ -54,8 +54,21 @@ async def run_detection_pipeline(
     db: AsyncSession,
     redis_client: redis.Redis,
     settings: Settings,
+    on_progress: Optional[any] = None,
 ) -> DetectionOutcome:
     start = time.perf_counter()
+
+    async def _notify_progress(stage: str, message: str, percent: int = 0):
+        if on_progress:
+            try:
+                res = on_progress(stage, message, percent)
+                import inspect
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                pass
+
+    await _notify_progress("init", "Memulai inisialisasi analisis lowongan...", 10)
 
     effective_text = text or ocr_text
 
@@ -64,6 +77,7 @@ async def run_detection_pipeline(
 
     ner_results = []
     if effective_text:
+        await _notify_progress("ner", "Mengekstraksi entitas teks menggunakan IndoBERT NER...", 25)
         ner_results = await run_ner(effective_text)
 
     processed_data = process_job_text(effective_text, ner_entities=ner_results) if effective_text else None
@@ -100,6 +114,7 @@ async def run_detection_pipeline(
         }
 
     # Model inference: selalu pakai text_clean_no_contact (tanpa kontak / sudah di-mask)
+    await _notify_progress("bert", "Menganalisis probabilitas penipuan dengan model IndoBERT...", 45)
     if text_clean_no_contact:
         p_bert = await predict_fraud_probability(text_clean_no_contact)
     elif text_to_store:
@@ -115,6 +130,7 @@ async def run_detection_pipeline(
     phone_to_validate = phone or (extracted_phones[0] if extracted_phones else None)
     email_to_validate = email or (extracted_emails[0] if extracted_emails else None)
 
+    await _notify_progress("validation", "Memverifikasi legalitas perusahaan, nomor kontak, & email...", 70)
     cache = VerificationCache(redis_client)
     validator_output = await run_validators(
         company=company_to_validate,
@@ -124,6 +140,7 @@ async def run_detection_pipeline(
         cache=cache,
     )
 
+    await _notify_progress("scoring", "Menghitung skor risiko & rekomendasi alternatif...", 88)
     risk = compute_risk(
         p_bert=p_bert,
         v_company=validator_output.v_company,
@@ -148,6 +165,7 @@ async def run_detection_pipeline(
 
     processing_ms = int((time.perf_counter() - start) * 1000)
 
+    await _notify_progress("complete", "Analisis selesai.", 100)
     repo = DetectionRepository(db)
     record = await repo.create(
         channel=channel,

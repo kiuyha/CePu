@@ -23,22 +23,22 @@ def _send(client, phone_hash: str, body: str, msg_type: str = "text"):
 
 def test_unrecognized_input_shows_main_menu(client):
     reply = _send(client, "user1", "halo")
-    assert "Pilih menu" in reply
+    assert "pilih menu" in reply.lower()
 
 
 def test_menu_1_shows_education_message(client):
     reply = _send(client, "user2", "1")
-    assert "Edukasi" in reply or "artikel" in reply.lower()
+    assert "edukasi" in reply.lower() or "artikel" in reply.lower()
 
 
 def test_menu_2_asks_for_report_details(client):
     reply = _send(client, "user3", "2")
-    assert "detail" in reply.lower() or "lapor" in reply.lower()
+    assert "lapor" in reply.lower() or "detail" in reply.lower()
 
 
 def test_menu_3_asks_for_detect_input(client):
     reply = _send(client, "user4", "3")
-    assert "cek" in reply.lower() or "kirim" in reply.lower()
+    assert "deteksi" in reply.lower() or "cek" in reply.lower()
 
 
 def test_footer_always_present(client):
@@ -68,7 +68,7 @@ def test_reset_then_normal_message_shows_menu_not_report_flow(client):
     _send(client, "user8", "2")
     _send(client, "user8", "reset")
     reply = _send(client, "user8", "halo lagi")
-    assert "Pilih menu" in reply  # bukan "laporan diterima"
+    assert "pilih menu" in reply.lower()
 
 
 async def test_report_flow_creates_report_in_db(client):
@@ -95,7 +95,7 @@ def test_report_flow_returns_to_idle_after_submitting(client):
     _send(client, "user10", "2")
     _send(client, "user10", "laporan pertama")
     reply = _send(client, "user10", "halo")
-    assert "Pilih menu" in reply
+    assert "pilih menu" in reply.lower()
 
 
 async def test_detect_flow_via_menu_3_runs_pipeline(client, monkeypatch):
@@ -107,9 +107,8 @@ async def test_detect_flow_via_menu_3_runs_pipeline(client, monkeypatch):
     _send(client, "user11", "3")
     reply = _send(client, "user11", "loker admin transfer dulu 500rb hub 081234567890")
 
-    assert "HASIL DETEKSI" in reply
     assert "Status:" in reply
-    assert "Alasan:" in reply
+    assert "Alasan" in reply
 
 
 async def test_direct_detection_without_menu_when_message_long_enough(client, monkeypatch):
@@ -124,13 +123,14 @@ async def test_direct_detection_without_menu_when_message_long_enough(client, mo
         "user12",
         "Loker admin gaji tinggi tanpa pengalaman transfer dulu ke rekening ini segera",
     )
-    assert "HASIL DETEKSI" in reply
+    assert "Status:" in reply
+    assert "Alasan" in reply
 
 
 def test_short_ambiguous_message_shows_menu_not_detection(client):
     """Pesan pendek yang ambigu -> menu, bukan deteksi."""
     reply = _send(client, "user13", "oke")
-    assert "Pilih menu" in reply
+    assert "pilih menu" in reply.lower()
 
 
 def test_image_message_gets_honest_not_supported_reply(client):

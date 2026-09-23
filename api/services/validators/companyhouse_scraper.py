@@ -23,6 +23,9 @@ def generate_company_slug(company_name: str) -> str:
 
 
 class CompanyHouseScraper:
+    # Simpan cookie aktif di level class agar request berikutnya otomatis memakai cookie ter-update
+    _active_cookies: dict[str, str] = {}
+
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self.session = requests.Session()
@@ -34,12 +37,24 @@ class CompanyHouseScraper:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
         })
+        # 1. Pasang cookie dari environment variable jika ada
         if self.settings.companyhouse_session_cookie:
-            # Format cookie string "key=value; key2=value2"
             for part in self.settings.companyhouse_session_cookie.split(";"):
                 if "=" in part:
                     k, v = part.strip().split("=", 1)
                     self.session.cookies.set(k.strip(), v.strip())
+                elif part.strip():
+                    self.session.cookies.set("companyhouse_session", part.strip())
+
+        # 2. Timpa dengan cookie aktif yang sudah diperbarui server
+        for k, v in self._active_cookies.items():
+            self.session.cookies.set(k, v)
+
+    def _update_cookies_from_response(self, resp: requests.Response) -> None:
+        """Menyimpan cookie baru yang dikirim server via set-cookie."""
+        for c in resp.cookies:
+            self._active_cookies[c.name] = c.value
+            self.session.cookies.set(c.name, c.value)
 
     def parse_company_page(self, html_content: str, default_name: str = "") -> dict[str, Any]:
         """
@@ -159,6 +174,7 @@ class CompanyHouseScraper:
                 timeout=self.settings.companyhouse_timeout_seconds,
                 allow_redirects=True,
             )
+            self._update_cookies_from_response(resp)
             if resp.status_code == 200:
                 parsed = self.parse_company_page(resp.text, default_name=company_name)
                 return parsed

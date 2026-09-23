@@ -1,4 +1,5 @@
 """Mesin status bot WhatsApp: menu, parsing, format balasan."""
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as redis
@@ -12,26 +13,69 @@ from .entity_extraction import extract_entities
 
 FOOTER = "\n\n---\n_Layanan ini adalah prototipe riset, bukan produk resmi._"
 
-STATUS_LABEL = {"rendah": "AMAN", "sedang": "WASPADA", "tinggi": "BAHAYA"}
+STATUS_LABEL = {
+    "rendah": "🟢 AMAN (Tingkat Risiko Penipuan Rendah)",
+    "sedang": "🟡 WASPADA (Tingkat Risiko Penipuan Sedang)",
+    "tinggi": "🔴 BAHAYA (Tingkat Risiko Penipuan Tinggi)",
+}
 
 MAIN_MENU_TEXT = (
-    "👋 Selamat datang di CePu -- Deteksi Penipuan Lowongan Kerja!\n\n"
-    "Pilih menu:\n"
-    "1. Edukasi\n"
-    "2. Lapor lowongan mencurigakan\n"
-    "3. Cek lowongan/kontak\n\n"
-    "Atau langsung kirim teks lowongan/nomor/email untuk langsung dicek.\n"
-    "Ketik 'bantuan' kapan saja untuk panduan, 'reset' untuk mulai ulang."
+    "Halo! 👋 Saya CePu, asisten kamu untuk mendeteksi lowongan kerja palsu. "
+    "Silakan pilih menu yang ingin kamu gunakan:\n"
+    "1️⃣ Edukasi – Belajar cara mengenali lowongan kerja palsu.\n"
+    "2️⃣ Lapor – Laporkan lowongan kerja mencurigakan.\n"
+    "3️⃣ Deteksi – Cek apakah lowongan kerja yang kamu terima palsu atau aman.\n\n"
+    "Balas dengan 1, 2, atau 3 sesuai pilihanmu."
+)
+
+EDUCATION_TEXT = (
+    "EDUKASI: Kenali Penipuan Lowongan Kerja\n\n"
+    "Halo 👋\n"
+    "Yuk pahami penipuan lowongan kerja supaya kamu tidak jadi korban!\n\n"
+    "📌 Apa itu penipuan lowongan kerja?\n"
+    "Penipuan ini biasanya menawarkan pekerjaan palsu untuk mengambil uang atau data pribadi. "
+    "Modusnya bisa berupa biaya administrasi, training berbayar, atau meminta data sensitif."
+)
+
+REPORT_GUIDE_TEXT = (
+    "📝 LAPOR LOWONGAN MENCURIGAKAN\n\n"
+    "Menemukan lowongan kerja yang mencurigakan atau indikasi penipuan?\n"
+    "Yuk laporkan datanya untuk membantu melindungi pencari kerja lainnya.\n\n"
+    "Silakan kirimkan informasi berikut di pesan ini:\n"
+    "📱 Nomor HP / Kontak Terduga\n"
+    "📧 Email Terduga\n"
+    "🏢 Nama Perusahaan\n"
+    "📝 Kronologi / Detail Pesan Lowongan\n\n"
+    "Ketik dan kirimkan informasi di atas untuk kami proses."
+)
+
+DETECTION_GUIDE_TEXT = (
+    "🔎 DETEKSI LOWONGAN PEKERJAAN\n\n"
+    "Curiga dengan sebuah lowongan kerja?\n"
+    "Yuk kirimkan datanya untuk kami bantu cek dan analisis.\n\n"
+    "Silakan lengkapi informasi berikut:\n\n"
+    "📱 Nomor HP Perekrut\n"
+    "Contoh: 08xxxxxxxxxx\n\n"
+    "📧 Email Perekrut\n"
+    "Contoh: namaperekrut@gmail.com\n\n"
+    "🏢 Nama Perusahaan\n"
+    "Tuliskan nama perusahaan yang tertera di lowongan\n\n"
+    "📝 Teks / Pesan Lowongan\n"
+    "Salin isi pesan atau deskripsi lowongan yang kamu terima\n\n"
+    "📎 Screenshot Lowongan\n"
+    "Kirim file dalam format PNG, JPG, atau PDF (maksimal 5MB)\n\n"
+    "Setelah data lengkap, kirimkan untuk proses deteksi.\n"
+    "Kami akan membantu meninjau apakah lowongan tersebut aman atau berpotensi penipuan."
 )
 
 HELP_TEXT = (
     "📖 Panduan CePu:\n"
-    "1 = lihat artikel edukasi\n"
-    "2 = lapor lowongan mencurigakan (kirim detailnya di pesan berikutnya)\n"
-    "3 = cek lowongan/kontak (kirim teksnya di pesan berikutnya)\n"
+    "1 = Edukasi mengenali penipuan loker\n"
+    "2 = Laporkan lowongan kerja mencurigakan\n"
+    "3 = Deteksi apakah lowongan aman atau penipuan\n"
     "'reset' = mulai ulang dari menu awal\n"
     "'bantuan' = tampilkan pesan ini lagi\n\n"
-    "Tips: kamu juga bisa langsung kirim teks lowongan tanpa pilih menu dulu."
+    "Tips: Kamu juga bisa langsung mengirimkan teks lowongan kerja kapan saja!"
 )
 
 
@@ -40,18 +84,19 @@ def _with_footer(text: str) -> str:
 
 
 def _format_detection_result(outcome: DetectionOutcome) -> str:
-    status_label = STATUS_LABEL.get(outcome.category, "TIDAK DIKETAHUI")
-    score_display = f"{outcome.risk_score:.2f}" if outcome.risk_score is not None else "-"
+    status_label = STATUS_LABEL.get(outcome.category, "⚪ STATUS TIDAK DIKETAHUI")
 
-    lines = ["🚩 HASIL DETEKSI", f"Status: {status_label} (skor {score_display})", "Alasan:"]
-    for i, reason in enumerate(outcome.reasons, start=1):
-        lines.append(f"{i}. {reason}")
+    lines = [f"Status: {status_label}", "Alasan Terindikasi:"]
+    if outcome.reasons:
+        for i, reason in enumerate(outcome.reasons, start=1):
+            lines.append(f"  {i}. {reason}")
+    else:
+        lines.append("  - Tidak ditemukan indikator penipuan yang mencurigakan.")
 
     if outcome.alternatives:
-        alt_lines = [f"- {alt['title']} ({alt['company']})" for alt in outcome.alternatives]
-        lines.append("Lowongan alternatif:\n" + "\n".join(alt_lines))
-    else:
-        lines.append("Lowongan alternatif: -")
+        lines.append("Rekomendasi Lowongan yang Lebih Aman:")
+        for i, alt in enumerate(outcome.alternatives, start=1):
+            lines.append(f"  {i}. {alt['title']} {alt['company']}")
 
     if outcome.degraded_sources:
         lines.append(
@@ -87,6 +132,7 @@ async def handle_inbound_message(
     db: AsyncSession,
     redis_client: redis.Redis,
     settings: Settings,
+    on_progress: Optional[any] = None,
 ) -> str:
     session_repo = WaSessionRepository(db)
     stripped_lower = msg_body.strip().lower()
@@ -125,6 +171,7 @@ async def handle_inbound_message(
             outcome = await run_detection_pipeline(
                 channel="wa", text=msg_body, company=None, phone=None, email=None,
                 db=db, redis_client=redis_client, settings=settings,
+                on_progress=on_progress,
             )
         except ModelNotReadyError:
             return _with_footer("⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya.")
@@ -136,6 +183,7 @@ async def handle_inbound_message(
             outcome = await run_detection_pipeline(
                 channel="wa", text=msg_body, company=None, phone=None, email=None,
                 db=db, redis_client=redis_client, settings=settings,
+                on_progress=on_progress,
             )
         except ModelNotReadyError:
             return _with_footer("⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya.")
@@ -143,26 +191,22 @@ async def handle_inbound_message(
 
     if stripped_lower == "1":
         article_repo = EducationArticleRepository(db)
-        articles = await article_repo.list_published(limit=5)
+        articles = await article_repo.list_published(limit=3)
         await session_repo.upsert(phone_hash, current_state="idle")
-        if not articles:
-            return _with_footer("Belum ada artikel edukasi tersedia saat ini.")
-        lines = ["📚 Artikel Edukasi:"] + [f"- {a.title}" for a in articles]
-        return _with_footer("\n".join(lines))
+        edu_content = [EDUCATION_TEXT]
+        if articles:
+            edu_content.append("\n📚 Artikel & Tips Terkini:")
+            for a in articles:
+                edu_content.append(f"• {a.title}")
+        return _with_footer("\n".join(edu_content))
 
     if stripped_lower == "2":
         await session_repo.upsert(phone_hash, current_state="awaiting_report")
-        return _with_footer(
-            "📝 Silakan kirim detail lowongan yang mencurigakan (nomor/email/nama "
-            "perusahaan, atau ceritakan kejadiannya) di pesan berikutnya."
-        )
+        return _with_footer(REPORT_GUIDE_TEXT)
 
     if stripped_lower == "3":
         await session_repo.upsert(phone_hash, current_state="awaiting_detect")
-        return _with_footer(
-            "🔍 Silakan kirim teks lowongan, nomor telepon, email, atau nama "
-            "perusahaan yang ingin dicek di pesan berikutnya."
-        )
+        return _with_footer(DETECTION_GUIDE_TEXT)
 
     await session_repo.upsert(phone_hash, current_state="idle")
     return _with_footer(MAIN_MENU_TEXT)

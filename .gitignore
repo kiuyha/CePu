@@ -2,5 +2,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 cepu_dev.db
+cepu_test.db
 .env
 .venv
+example
+gateway-wa/session/
+gateway-wa/node_modules/
+web/node_modules/

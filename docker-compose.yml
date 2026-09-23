@@ -1,0 +1,92 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cepu-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cepu_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cepu_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cepu}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cepu_user} -d ${POSTGRES_DB:-cepu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cepu-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cepu-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DB_URL=postgresql://cepu_user:cepu_password@db:5432/cepu
+      - REDIS_URL=redis://redis:6379/0
+      - WA_SESSION_PATH=/app/gateway-wa/session
+    ports:
+      - "5687:5687"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - cepu_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: cepu-web
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  gateway-wa:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway-wa
+    container_name: cepu-gateway-wa
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - VITE_API_URL=http://backend:5687
+      - BACKEND_URL=http://backend:5687
+      - WA_SESSION_PATH=/app/session
+    volumes:
+      - wa_session:/app/session
+    stdin_open: true
+    tty: true
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  hf_cache:
+  cepu_data:
+  wa_session:

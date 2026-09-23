@@ -63,9 +63,21 @@ def build_reasons(
     if ahu.get("binary") is True:
         reasons.append("Nama perusahaan tidak ditemukan di data AHU")
 
-    phone = validator_details.get("intel_blacklist", {})
+    phone = validator_details.get("phone_check") or validator_details.get("intel_blacklist", {})
     if phone.get("binary") is True:
-        reasons.append("Nomor telah dilaporkan sebagai indikasi penipuan oleh pengguna lain")
+        phone_source = phone.get("source")
+        if phone_source == "aduannomor.id":
+            reasons.append("Nomor kontak terdaftar dalam database laporan penipuan aduannomor.id (Kominfo)")
+        elif phone_source == "kredibel.com":
+            reasons.append("Nomor kontak memiliki reputasi buruk / ulasan penipuan di kredibel.com")
+        else:
+            reasons.append("Nomor telah dilaporkan sebagai indikasi penipuan oleh pengguna lain")
+    elif phone.get("binary") is False:
+        phone_source = phone.get("source")
+        if phone_source == "aduannomor.id":
+            reasons.append("Nomor kontak bersih dari catatan aduan di aduannomor.id")
+        elif phone_source == "kredibel.com":
+            reasons.append("Nomor kontak berstatus aman / terpercaya pada catatan kredibel.com")
 
     email = validator_details.get("dns_mx", {})
     if email.get("binary") is True:

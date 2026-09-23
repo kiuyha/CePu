@@ -23,6 +23,7 @@ class WaMessage(BaseModel):
 class WaInboundPayload(BaseModel):
     phone_hash: str
     msg: WaMessage
+    stream: bool = False
 
 
 def _verify_internal_token(
@@ -40,12 +41,64 @@ async def wa_inbound(
     db: AsyncSession = Depends(get_db_session),
     redis_client: redis.Redis = Depends(get_redis_client),
 ):
-    reply = await handle_inbound_message(
-        phone_hash=payload.phone_hash,
-        msg_type=payload.msg.type,
-        msg_body=payload.msg.body,
-        db=db,
-        redis_client=redis_client,
-        settings=settings,
+    if not payload.stream:
+        reply = await handle_inbound_message(
+            phone_hash=payload.phone_hash,
+            msg_type=payload.msg.type,
+            msg_body=payload.msg.body,
+            db=db,
+            redis_client=redis_client,
+            settings=settings,
+        )
+        return {"reply": reply}
+
+    # Streaming mode for WhatsApp gateway
+    import asyncio
+    import json
+    from fastapi.responses import StreamingResponse
+
+    queue = asyncio.Queue()
+
+    async def _progress_callback(stage: str, message: str, percent: int):
+        await queue.put({
+            "type": "progress",
+            "stage": stage,
+            "message": message,
+            "percent": percent,
+        })
+
+    async def _worker():
+        try:
+            reply = await handle_inbound_message(
+                phone_hash=payload.phone_hash,
+                msg_type=payload.msg.type,
+                msg_body=payload.msg.body,
+                db=db,
+                redis_client=redis_client,
+                settings=settings,
+                on_progress=_progress_callback,
+            )
+            await queue.put({"type": "result", "reply": reply})
+        except Exception as e:
+            await queue.put({"type": "error", "message": str(e)})
+        finally:
+            await queue.put(None)
+
+    asyncio.create_task(_worker())
+
+    async def event_generator():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
     )
-    return {"reply": reply}

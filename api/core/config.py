@@ -4,12 +4,18 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+_API_DIR = Path(__file__).resolve().parent.parent
+
+_ENV_FILE_PATHS = [
+    _ROOT_DIR / ".env",
+    _API_DIR / ".env",
+]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=_ENV_FILE_PATH,
+        env_file=_ENV_FILE_PATHS,
         extra="ignore",
         protected_namespaces=("settings_",),
     )
@@ -60,6 +66,17 @@ class Settings(BaseSettings):
         "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
     companyhouse_timeout_seconds: float = 5.0
+
+    # Phone Checking Configuration (aduannomor.id & kredibel.com)
+    aduannomor_base_url: str = "https://aduannomor.id"
+    aduannomor_timeout_seconds: float = 5.0
+    kredibel_base_url: str = "https://www.kredibel.com"
+    kredibel_session_cookie: str = ""
+    kredibel_user_agent: str = (
+        "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36"
+    )
+    kredibel_timeout_seconds: float = 6.0
 
     # Email Verifier Settings
     disposable_domains_sync_url: str = (

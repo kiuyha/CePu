@@ -1,0 +1,16 @@
+{
+  "name": "gateway-wa",
+  "version": "1.0.0",
+  "description": "WhatsApp Personal Gateway for CePu Fraud Detection Bot",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.12",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

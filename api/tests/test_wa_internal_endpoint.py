@@ -41,4 +41,4 @@ def test_wa_inbound_returns_main_menu_for_unrecognized_text(client):
         headers={"X-Internal-Token": SETTINGS.internal_token},
     )
     reply = response.json()["reply"]
-    assert "Pilih menu" in reply
+    assert "pilih menu" in reply.lower()

@@ -14,6 +14,7 @@ from .blacklist import check_blacklist
 from .company_registry import check_company_registry
 from .dns_mx import check_email_mx
 from .linkedin import check_company_linkedin
+from .phone_checker import check_phone_reputation
 
 NEUTRAL_SCORE = 0.5
 
@@ -118,14 +119,14 @@ async def run_validators(
     dns_task = _resolve_with_db(
         "email", email, lambda em, s: check_email_mx(em, company_name=company, db=s), "dns_mx", db, cache
     )
-    blacklist_task = _resolve_blacklist(phone, "phone", db, cache)
+    phone_task = _resolve_with_db("phone", phone, check_phone_reputation, "phone_check", db, cache)
 
     (ahu_score, ahu_binary, ahu_source, ahu_degraded), \
         (li_score, li_binary, li_source, li_degraded), \
         (reg_score, reg_binary, reg_source, reg_degraded), \
         (email_score, email_binary, email_source, email_degraded), \
         (phone_score, phone_binary, phone_source, phone_degraded) = await asyncio.gather(
-        ahu_task, linkedin_task, registry_task, dns_task, blacklist_task
+        ahu_task, linkedin_task, registry_task, dns_task, phone_task
     )
 
     v_company = (ahu_score + li_score + reg_score) / 3
@@ -140,7 +141,7 @@ async def run_validators(
     if email_degraded:
         degraded_sources.append("dns_mx")
     if phone_degraded:
-        degraded_sources.append("intel_blacklist")
+        degraded_sources.append("phone_check")
 
     return ValidatorOutput(
         v_company=v_company,
@@ -153,5 +154,6 @@ async def run_validators(
             "company_registry": {"score": reg_score, "binary": reg_binary, "source": reg_source},
             "dns_mx": {"score": email_score, "binary": email_binary, "source": email_source},
             "intel_blacklist": {"score": phone_score, "binary": phone_binary, "source": phone_source},
+            "phone_check": {"score": phone_score, "binary": phone_binary, "source": phone_source},
         },
     )

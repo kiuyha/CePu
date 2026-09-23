@@ -1,0 +1,35 @@
+# CePu Backend (FastAPI + PyTorch/IndoBERT)
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies (build-essential, curl, libgl untuk OpenCV/OCR)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install python dependencies
+COPY api/requirements.txt /app/api/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r /app/api/requirements.txt
+
+# Copy application source code
+COPY api /app/api
+COPY scripts /app/scripts
+
+# Default environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=5687
+
+EXPOSE 5687
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -f http://127.0.0.1:5687/healthz || exit 1
+
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "5687"]
