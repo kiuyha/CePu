@@ -45,7 +45,7 @@ async def load_model() -> None:
     def _blocking_load():
         from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
-        tokenizer = AutoTokenizer.from_pretrained(_settings.hf_model_id)
+        tokenizer = AutoTokenizer.from_pretrained(_settings.hf_model_id, clean_up_tokenization_spaces=True)
         model = AutoModelForSequenceClassification.from_pretrained(_settings.hf_model_id)
         model.eval()
 
@@ -57,6 +57,7 @@ async def load_model() -> None:
                 aggregation_strategy="simple",
                 device=-1,  # CPU by default for stability
                 stride=64,
+                clean_up_tokenization_spaces=True,
             )
             ner_pipe.tokenizer.model_max_length = _settings.ner_max_length
         except Exception:

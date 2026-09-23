@@ -195,11 +195,23 @@ class KredibelScraper:
                         status_code = int(parts[1])
                         break
 
-            if status_code in (200, 302, 304):
-                if status_code == 302 and "login" in body:
-                    logger.warning("Kredibel redirected to login: session cookie might be expired.")
-                    return None
+            if status_code == 200:
                 return self.parse_kredibel_page(body)
+            elif status_code in (301, 302, 303, 307, 308):
+                # Check Location header to detect login redirect
+                location = ""
+                for line in all_header_lines:
+                    if line.lower().startswith("location:"):
+                        location = line.split(":", 1)[1].strip().lower()
+                        break
+                if "login" in location or "login" in body.lower():
+                    logger.warning(
+                        "Kredibel redirected to login: session cookie might be expired. "
+                        "Update KREDIBEL_SESSION_COOKIE in your .env file."
+                    )
+                else:
+                    logger.warning("Kredibel returned HTTP %d (redirect to: %s)", status_code, location)
+                return None
             else:
                 logger.warning("Kredibel returned HTTP %d", status_code)
                 return None

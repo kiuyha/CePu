@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { UploadCloud, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { UploadCloud, Loader2, CheckCircle2, AlertCircle, X } from 'lucide-react';
 import { submitReport } from '../api';
 
 export const ReportPage: React.FC = () => {
@@ -8,6 +8,8 @@ export const ReportPage: React.FC = () => {
   const [company, setCompany] = useState('');
   const [text, setText] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -15,16 +17,79 @@ export const ReportPage: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const setUploadedFile = (newFile: File | null) => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setFile(newFile);
+    if (newFile && newFile.type.startsWith('image/')) {
+      setPreviewUrl(URL.createObjectURL(newFile));
+    } else {
+      setPreviewUrl(null);
+    }
+  };
+
+  const fetchImageFromUrl = async (url: string) => {
+    try {
+      setErrorMessage(null);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Gagal mengunduh gambar');
+      const blob = await res.blob();
+      if (!blob.type.startsWith('image/')) throw new Error('Bukan file gambar');
+      const filename = url.split('/').pop()?.split('?')[0] || 'pasted-image.png';
+      setUploadedFile(new File([blob], filename, { type: blob.type }));
+    } catch {
+      setText((prev) => (prev ? `${prev}\n${url}` : url));
+    }
+  };
+
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            e.preventDefault();
+            const extension = blob.type.split('/')[1] || 'png';
+            setUploadedFile(new File([blob], `screenshot-${Date.now()}.${extension}`, { type: blob.type }));
+            return;
+          }
+        }
+      }
+
+      const pastedText = e.clipboardData?.getData('text')?.trim();
+      if (pastedText && !isInput && /^(https?:\/\/.*\.(?:png|jpg|jpeg|webp|gif|bmp)(\?.*)?)$/i.test(pastedText)) {
+        e.preventDefault();
+        fetchImageFromUrl(pastedText);
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => {
+      window.removeEventListener('paste', handlePaste);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+      setUploadedFile(e.target.files[0]);
     }
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setFile(e.dataTransfer.files[0]);
+      setUploadedFile(e.dataTransfer.files[0]);
+    } else {
+      const droppedUrl = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+      if (droppedUrl && droppedUrl.startsWith('http')) {
+        fetchImageFromUrl(droppedUrl.trim());
+      }
     }
   };
 
@@ -159,10 +224,15 @@ export const ReportPage: React.FC = () => {
         <div className="form-group">
           <label className="form-label">Screenshot Lowongan</label>
           <div
-            className="upload-dropzone"
+            className={`upload-dropzone ${isDragging ? 'dragover' : ''}`}
             onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
+            style={{ position: 'relative' }}
           >
             <input
               type="file"
@@ -172,15 +242,46 @@ export const ReportPage: React.FC = () => {
               onChange={handleFileChange}
             />
             {file ? (
-              <div className="uploaded-preview-badge">
-                <CheckCircle2 size={16} />
-                <span>{file.name} ({(file.size / 1024).toFixed(1)} KB)</span>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', width: '100%' }}>
+                {previewUrl && (
+                  <div style={{ position: 'relative', maxWidth: '200px', maxHeight: '140px', overflow: 'hidden', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
+                    <img src={previewUrl} alt="Preview Screenshot" style={{ width: '100%', height: 'auto', objectFit: 'contain', display: 'block' }} />
+                  </div>
+                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div className="uploaded-preview-badge">
+                    <CheckCircle2 size={16} />
+                    <span>{file.name} ({(file.size / 1024).toFixed(1)} KB)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setUploadedFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.1)',
+                      color: '#EF4444',
+                      border: 'none',
+                      borderRadius: '8px',
+                      padding: '6px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    title="Hapus gambar"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
               </div>
             ) : (
               <>
                 <UploadCloud size={28} className="upload-icon" />
-                <span className="upload-main-text">Klik atau seret file ke sini</span>
-                <span className="upload-sub-text">PNG, JPG, PDF (maks 5MB)</span>
+                <span className="upload-main-text">Klik, seret, atau tekan <strong>Ctrl + V</strong> untuk tempel</span>
+                <span className="upload-sub-text">Bisa langsung paste screenshot dari clipboard atau link gambar (PNG, JPG, WebP)</span>
               </>
             )}
           </div>

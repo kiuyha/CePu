@@ -9,7 +9,7 @@ from ..core.config import Settings, get_settings
 from ..core.rate_limit import enforce_detect_rate_limit
 from ..core.redis_client import get_redis_client
 from ..core.validation import ensure_not_empty, validate_image
-from ..db.base import get_db_session
+from ..db.base import get_db_session, async_session_factory
 from ..services.detection_pipeline import run_detection_pipeline
 
 router = APIRouter(prefix="/v1", tags=["detect"])
@@ -68,7 +68,9 @@ async def detect_stream(
     phone: Optional[str] = Form(default=None),
     image: Union[UploadFile, str, None] = File(default=None),
     settings: Settings = Depends(get_settings),
-    db: AsyncSession = Depends(get_db_session),
+    # NOTE: db is NOT injected here — the background task opens its own
+    # session to prevent the GC connection-leak warning caused by the
+    # session being released before the task finishes.
     redis_client: redis.Redis = Depends(get_redis_client),
 ):
     import asyncio
@@ -95,36 +97,40 @@ async def detect_stream(
         })
 
     async def _run_task():
-        try:
-            ocr_text = None
-            if image_bytes:
-                await _progress_callback("ocr", "Membaca teks dari gambar menggunakan RapidOCR...", 15)
-                from ..services.ocr import extract_text_from_image_bytes
-                ocr_text, _ = await asyncio.to_thread(extract_text_from_image_bytes, image_bytes)
+        # Open a fresh, self-contained DB session scoped to this task.
+        # This avoids the SQLAlchemy GC warning caused by the request-scoped
+        # session being torn down before the background task finishes.
+        async with async_session_factory() as task_db:
+            try:
+                ocr_text = None
+                if image_bytes:
+                    await _progress_callback("ocr", "Membaca teks dari gambar menggunakan RapidOCR...", 15)
+                    from ..services.ocr import extract_text_from_image_bytes
+                    ocr_text, _ = await asyncio.to_thread(extract_text_from_image_bytes, image_bytes)
 
-            outcome = await run_detection_pipeline(
-                channel="web",
-                text=text,
-                ocr_text=ocr_text,
-                company=company,
-                phone=phone,
-                email=email,
-                db=db,
-                redis_client=redis_client,
-                settings=settings,
-                on_progress=_progress_callback,
-            )
-            await queue.put({
-                "type": "result",
-                "data": outcome.to_api_response(),
-            })
-        except Exception as e:
-            await queue.put({
-                "type": "error",
-                "message": str(e) or "Terjadi kesalahan internal saat analisis.",
-            })
-        finally:
-            await queue.put(None)  # Sentinel to finish generator
+                outcome = await run_detection_pipeline(
+                    channel="web",
+                    text=text,
+                    ocr_text=ocr_text,
+                    company=company,
+                    phone=phone,
+                    email=email,
+                    db=task_db,
+                    redis_client=redis_client,
+                    settings=settings,
+                    on_progress=_progress_callback,
+                )
+                await queue.put({
+                    "type": "result",
+                    "data": outcome.to_api_response(),
+                })
+            except Exception as e:
+                await queue.put({
+                    "type": "error",
+                    "message": str(e) or "Terjadi kesalahan internal saat analisis.",
+                })
+            finally:
+                await queue.put(None)  # Sentinel to finish generator
 
     asyncio.create_task(_run_task())
 
