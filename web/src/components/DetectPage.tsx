@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { detectJob } from '../api';
+import { UploadCloud, Loader2, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
+import { detectJobStream, type ProgressUpdate } from '../api';
 import type { DetectResponse } from '../types';
 import { ResultModal } from './ResultModal';
 
@@ -12,6 +12,7 @@ export const DetectPage: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
 
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<ProgressUpdate | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<DetectResponse | null>(null);
 
@@ -39,6 +40,7 @@ export const DetectPage: React.FC = () => {
 
     setErrorMessage(null);
     setLoading(true);
+    setProgress({ stage: 'init', message: 'Menghubungkan ke sistem analisis...', percent: 5 });
 
     const formData = new FormData();
     if (phone.trim()) formData.append('phone', phone.trim());
@@ -48,12 +50,15 @@ export const DetectPage: React.FC = () => {
     if (file) formData.append('image', file);
 
     try {
-      const data = await detectJob(formData);
+      const data = await detectJobStream(formData, (update) => {
+        setProgress(update);
+      });
       setResult(data);
     } catch (err: any) {
       setErrorMessage(err.message || 'Terjadi kesalahan saat memproses deteksi');
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   };
 
@@ -159,11 +164,62 @@ export const DetectPage: React.FC = () => {
           </div>
         </div>
 
+        {loading && progress && (
+          <div style={{
+            background: 'var(--card-bg, #ffffff)',
+            border: '1px solid var(--border-color, #E2E8F0)',
+            borderRadius: '12px',
+            padding: '16px',
+            marginBottom: '16px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontWeight: 600, color: 'var(--primary-blue, #2563EB)' }}>
+                <Sparkles size={16} className="animate-spin" />
+                <span>Progres Analisis AI & Verifikasi</span>
+              </div>
+              <span style={{ fontSize: '12.5px', fontWeight: 700, color: 'var(--primary-blue, #2563EB)' }}>
+                {progress.percent}%
+              </span>
+            </div>
+
+            {/* Progress Bar Container */}
+            <div style={{
+              width: '100%',
+              height: '8px',
+              backgroundColor: 'var(--border-color, #E2E8F0)',
+              borderRadius: '999px',
+              overflow: 'hidden',
+              marginBottom: '10px'
+            }}>
+              <div style={{
+                width: `${progress.percent}%`,
+                height: '100%',
+                backgroundColor: 'var(--primary-blue, #2563EB)',
+                borderRadius: '999px',
+                transition: 'width 0.4s ease-in-out',
+              }} />
+            </div>
+
+            <p style={{
+              margin: 0,
+              fontSize: '12px',
+              color: 'var(--secondary-text, #64748B)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}>
+              <Loader2 size={13} className="animate-spin" />
+              <span>{progress.message}</span>
+            </p>
+          </div>
+        )}
+
         <button type="submit" className="btn-primary" disabled={loading}>
           {loading ? (
             <>
               <Loader2 size={18} className="animate-spin" />
-              <span>Menganalisis...</span>
+              <span>{progress ? `${progress.percent}% - Menganalisis...` : 'Menganalisis...'}</span>
             </>
           ) : (
             'Deteksi Sekarang'
