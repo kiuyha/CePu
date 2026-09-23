@@ -33,14 +33,22 @@ async def detect(
 
     ensure_not_empty(text, company, email, phone, image=image)
 
+    image_bytes = None
+    ocr_text = None
     if image is not None and image.filename:
-        await validate_image(image, settings)
+        image_bytes = await validate_image(image, settings)
+        try:
+            import asyncio
+            from ..services.ocr import extract_text_from_image_bytes
 
-    # TODO: OCR untuk input gambar (di luar cakupan saat ini)
+            ocr_text, _ = await asyncio.to_thread(extract_text_from_image_bytes, image_bytes)
+        except Exception:
+            ocr_text = None
 
     outcome = await run_detection_pipeline(
         channel="web",
         text=text,
+        ocr_text=ocr_text,
         company=company,
         phone=phone,
         email=email,
@@ -50,3 +58,4 @@ async def detect(
     )
 
     return outcome.to_api_response()
+

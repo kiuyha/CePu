@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     bert_max_length: int = 256
     bert_max_concurrent_inference: int = 2
 
+    # NER Model
+    ner_model_id: str = "fahmisyaifudin/indobert_ner_p1"
+    ner_max_length: int = 512
+
     # WhatsApp gateway
     wa_session_path: str = "./gateway-wa/session"
 
@@ -47,6 +51,26 @@ class Settings(BaseSettings):
 
     # OCR
     ocr_lang: str = "ind+eng"
+
+    # CompanyHouse.id Scraper Configuration
+    companyhouse_base_url: str = "https://companyhouse.id"
+    companyhouse_session_cookie: str = ""
+    companyhouse_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    )
+    companyhouse_timeout_seconds: float = 5.0
+
+    # Email Verifier Settings
+    disposable_domains_sync_url: str = (
+        "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf"
+    )
+    disposable_email_domains: str = (
+        "yopmail.com,mailinator.com,tempmail.com,guerrillamail.com,10minutemail.com,trashmail.com,sharklasers.com,dispostable.com"
+    )
+    free_email_domains: str = (
+        "gmail.com,yahoo.com,hotmail.com,outlook.com,icloud.com,aol.com,zoho.com"
+    )
 
     # Upload constraints
     max_upload_size_bytes: int = 2 * 1024 * 1024

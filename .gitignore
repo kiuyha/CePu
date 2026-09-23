@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 cepu_dev.db
 .env
+.venv

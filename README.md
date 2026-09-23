@@ -94,9 +94,19 @@ cepu/
 └── deploy/.env.example
 ```
 
-## Keterbatasan Saat Ini
+## Catatan Implementasi
 
-- OCR untuk input gambar belum diimplementasikan
-- Validator AHU/LinkedIn masih placeholder (data legitimasi perusahaan pakai `company_registry` internal, hasil seed dari data lowongan yang berhasil dikumpulkan)
-- Tabel `disposable_domains` dan `model_artifacts` (sesuai skema arsitektur) belum dibuat
-- Job cleanup retensi data (hapus data lama otomatis) belum ada
+- **OCR**: Menggunakan **RapidOCR (ONNX Runtime)** untuk ekstraksi teks gambar secara cepat dan efisien pada CPU/VPS.
+- **Validator Legalitas Perusahaan**: Terintegrasi dengan scraper modular **companyhouse.id** berbasis session HTTP, secara otomatis memverifikasi dan menyimpan profil badan hukum ke database `company_registry`.
+- **Email Verifier Multi-Tahap**:
+  1. **MX & DNS Active Records**: Memeriksa apakah domain email memiliki mail exchanger aktif via `dnspython`. Jika MX tidak ditemukan, domain diberi skor penalti (0.80).
+  2. **Disposable & Temporary Webmail Detection (Database & GitHub Sync)**:
+     - Menggunakan tabel database `disposable_domains` yang disinkronisasi secara berkala dari repositori open-source GitHub (`disposable-email-domains/disposable-email-domains`).
+     - Sinkronisasi manual/cron job mingguan dapat dijalankan melalui script `python scripts/sync_disposable_domains.py`.
+     - Terdapat fallback ke environment variable `DISPOSABLE_EMAIL_DOMAINS` jika tabel DB belum di-seed.
+     - Jika terdeteksi sebagai disposable domain, sistem mengenakan penalti berat (0.95).
+  3. **Domain Mismatch & Similarity (Lookalike/Typosquatting)**: Menghitung jarak Levenshtein antara domain email dengan nama perusahaan resmi. Jika terdeteksi modus typosquatting atau penambahan prefiks/sufiks (contoh: perusahaan `tokopedia` namun menggunakan email `hrd@tokopedia-recruitment.com`), domain langsung ditandai sebagai indikasi impersonasi/spoofing (0.85).
+  4. **Corporate vs Free Webmail Flag**: Jika pengirim mengklaim sebagai entitas korporasi formal (`PT`, `CV`, dsb.) tetapi menggunakan domain webmail publik gratis (`@gmail.com`, `@yahoo.com`, dsb. dari `FREE_EMAIL_DOMAINS`), sistem menerapkan penalti (0.70) dan memberikan alasan edukasi terkait penggunaan email resmi perusahaan.
+
+
+

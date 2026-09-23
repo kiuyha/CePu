@@ -11,8 +11,8 @@ from ..core.config import Settings
 from ..core.errors import ModelNotReadyError
 from ..db.repository import DetectionRepository, JobAlternativeRepository
 from .anonymize import anonymize_text
-from .bert_infer import is_model_loaded, predict_fraud_probability
-from .entity_extraction import extract_entities
+from .bert_infer import is_model_loaded, predict_fraud_probability, run_ner
+from .entity_extraction import extract_entities, extract_entities_and_features, process_job_text
 from .risk_scorer import build_reasons, compute_risk
 from .validators.orchestrator import run_validators
 
@@ -47,6 +47,7 @@ async def run_detection_pipeline(
     *,
     channel: str,
     text: Optional[str],
+    ocr_text: Optional[str] = None,
     company: Optional[str],
     phone: Optional[str],
     email: Optional[str],
@@ -56,33 +57,63 @@ async def run_detection_pipeline(
 ) -> DetectionOutcome:
     start = time.perf_counter()
 
-    if text and not is_model_loaded():
+    effective_text = text or ocr_text
+
+    if effective_text and not is_model_loaded():
         raise ModelNotReadyError("Model klasifikasi belum siap dimuat. Coba lagi sesaat lagi.")
 
-    entities = extract_entities(text) if text else None
+    ner_results = []
+    if effective_text:
+        ner_results = await run_ner(effective_text)
 
-    anonymized = anonymize_text(text) if text else None
-    text_to_store = anonymized.anonymized_text if anonymized else text
+    processed_data = process_job_text(effective_text, ner_entities=ner_results) if effective_text else None
+    text_clean_no_contact = processed_data["text_clean_no_contact"] if processed_data else ""
+    text_clean_with_contact = processed_data["text_clean_with_contact"] if processed_data else (effective_text or "")
 
+
+    # Anonimisasi NIK dan nama untuk teks yang akan disimpan di DB
+    anonymized = anonymize_text(text_clean_with_contact) if text_clean_with_contact else None
+    text_to_store = anonymized.anonymized_text if anonymized else text_clean_with_contact
+
+    feature_reasons = []
     features = None
-    if entities is not None:
+    if processed_data is not None:
+        extracted_feats = extract_entities_and_features(
+            text_clean_no_contact,
+            emails=processed_data["extracted_emails"],
+            phones=processed_data["extracted_phones"],
+            urls=processed_data["extracted_urls"],
+            companies=processed_data["extracted_companies"],
+        )
+        feature_reasons = extracted_feats["reasons"]
         features = {
-            "extracted_phones": entities.phones,
-            "extracted_emails": entities.emails,
-            "extracted_companies": entities.companies,
-            "company_source": entities.company_source,
+            "extracted_phones": processed_data["extracted_phones"],
+            "extracted_emails": processed_data["extracted_emails"],
+            "extracted_companies": processed_data["extracted_companies"],
+            "extracted_urls": processed_data["extracted_urls"],
+            "company_source": "ner_and_heuristic" if ner_results else "heuristic_prefix",
+            "digit_count": extracted_feats["digit_count"],
+            "special_char_ratio": extracted_feats["special_char_ratio"],
+            "suspicious_keyword_count": extracted_feats["suspicious_keyword_count"],
             "nik_found_count": anonymized.nik_found_count if anonymized else 0,
             "names_neutralized_count": anonymized.names_neutralized_count if anonymized else 0,
         }
 
-    if text_to_store:
+    # Model inference: selalu pakai text_clean_no_contact (tanpa kontak / sudah di-mask)
+    if text_clean_no_contact:
+        p_bert = await predict_fraud_probability(text_clean_no_contact)
+    elif text_to_store:
         p_bert = await predict_fraud_probability(text_to_store)
     else:
         p_bert = NEUTRAL_P_BERT
 
-    company_to_validate = company or (entities.companies[0] if entities and entities.companies else None)
-    phone_to_validate = phone or (entities.phones[0] if entities and entities.phones else None)
-    email_to_validate = email or (entities.emails[0] if entities and entities.emails else None)
+    extracted_companies = processed_data["extracted_companies"] if processed_data else []
+    extracted_phones = processed_data["extracted_phones"] if processed_data else []
+    extracted_emails = processed_data["extracted_emails"] if processed_data else []
+
+    company_to_validate = company or (extracted_companies[0] if extracted_companies else None)
+    phone_to_validate = phone or (extracted_phones[0] if extracted_phones else None)
+    email_to_validate = email or (extracted_emails[0] if extracted_emails else None)
 
     cache = VerificationCache(redis_client)
     validator_output = await run_validators(
@@ -103,6 +134,7 @@ async def run_detection_pipeline(
         p_bert=p_bert,
         validator_details=validator_output.details,
         category=risk.category,
+        feature_reasons=feature_reasons,
     )
 
     alternatives = []
@@ -120,6 +152,7 @@ async def run_detection_pipeline(
     record = await repo.create(
         channel=channel,
         text_input=text_to_store,
+        ocr_text=ocr_text,
         features=features,
         p_bert=p_bert,
         v_company=validator_output.v_company,

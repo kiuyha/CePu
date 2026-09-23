@@ -128,3 +128,12 @@ class EducationArticle(Base):
     tags: Mapped[list | None] = mapped_column(JsonVariant, nullable=True)
     published: Mapped[bool] = mapped_column(default=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DisposableDomain(Base):
+    __tablename__ = "disposable_domains"
+
+    domain: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str] = mapped_column(String(100), default="github/disposable-email-domains")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+

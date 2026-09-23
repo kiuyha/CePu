@@ -110,12 +110,14 @@ async def run_validators(
     db: AsyncSession,
     cache: VerificationCache,
 ) -> ValidatorOutput:
-    ahu_task = _resolve("company", company, check_company_ahu, "ahu", cache)
+    ahu_task = _resolve_with_db("company", company, check_company_ahu, "ahu", db, cache)
     linkedin_task = _resolve("company", company, check_company_linkedin, "linkedin", cache)
     registry_task = _resolve_with_db(
         "company", company, check_company_registry, "company_registry", db, cache
     )
-    dns_task = _resolve("email", email, check_email_mx, "dns_mx", cache)
+    dns_task = _resolve_with_db(
+        "email", email, lambda em, s: check_email_mx(em, company_name=company, db=s), "dns_mx", db, cache
+    )
     blacklist_task = _resolve_blacklist(phone, "phone", db, cache)
 
     (ahu_score, ahu_binary, ahu_source, ahu_degraded), \

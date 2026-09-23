@@ -235,3 +235,34 @@ class EducationArticleRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+
+class DisposableDomainRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def is_disposable(self, domain: str) -> bool:
+        norm = domain.strip().lower()
+        from .models import DisposableDomain
+        result = await self.session.execute(
+            select(DisposableDomain).where(DisposableDomain.domain == norm)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def bulk_upsert(self, domains: list[str], source: str = "github/disposable-email-domains") -> int:
+        from .models import DisposableDomain
+        count = 0
+        for d in domains:
+            norm = d.strip().lower()
+            if not norm:
+                continue
+            existing = await self.session.execute(
+                select(DisposableDomain).where(DisposableDomain.domain == norm)
+            )
+            if existing.scalar_one_or_none() is None:
+                self.session.add(DisposableDomain(domain=norm, source=source))
+                count += 1
+        if count > 0:
+            await self.session.commit()
+        return count
+

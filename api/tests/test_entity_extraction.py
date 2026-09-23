@@ -89,3 +89,46 @@ def test_extract_entities_empty_text_returns_all_empty():
     assert result.phones == []
     assert result.emails == []
     assert result.companies == []
+
+
+# ---------- notebook specific: artifacts stripping & process_job_text ----------
+
+def test_strip_source_artifacts_cleans_hoax_narratives_and_emojis():
+    from api.services.entity_extraction import strip_source_artifacts
+
+    raw = "🔥 Cek fakta turnbackhoax! 💼 Lowongan kerja #loker2024"
+    cleaned = strip_source_artifacts(raw)
+    assert "turnbackhoax" not in cleaned.lower()
+    assert "cek fakta" not in cleaned.lower()
+    assert "🔥" not in cleaned
+    assert "💼" not in cleaned
+
+
+def test_process_job_text_masks_contacts_and_companies():
+    from api.services.entity_extraction import process_job_text
+
+    raw = (
+        "Lowongan PT Sejahtera Abadi posisi staff. "
+        "Hubungi 081234567890 atau email hr@sejahtera.com atau https://sejahtera.com"
+    )
+    processed = process_job_text(raw)
+
+    assert "[PERUSAHAAN]" in processed["text_clean_no_contact"]
+    assert "[NOMOR_HP]" in processed["text_clean_no_contact"]
+    assert "[EMAIL]" in processed["text_clean_no_contact"]
+    assert "[URL]" in processed["text_clean_no_contact"]
+    assert "PT Sejahtera Abadi" in processed["extracted_companies"]
+    assert "081234567890" in processed["extracted_phones"]
+    assert "hr@sejahtera.com" in processed["extracted_emails"]
+
+
+def test_extract_entities_and_features_computes_keyword_and_stats():
+    from api.services.entity_extraction import extract_entities_and_features
+
+    text = "Mohon transfer biaya pendaftaran administrasi sebesar 50000000000000000"
+    feats = extract_entities_and_features(text)
+
+    assert feats["suspicious_keyword_count"] >= 2
+    assert any("kata kunci mencurigakan" in r for r in feats["reasons"])
+    assert any("Frekuensi karakter angka tinggi" in r for r in feats["reasons"])
+

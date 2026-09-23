@@ -88,6 +88,66 @@ async def test_check_email_mx_malformed_email_returns_high_score():
     assert result.verdict_score > 0.5
 
 
+async def test_check_email_disposable_domain_returns_penalty():
+    result = await check_email_mx("recruitment@yopmail.com")
+    assert result.verdict_binary is True
+    assert result.verdict_score == 0.95
+
+
+async def test_check_email_domain_similarity_impersonation_flagged():
+    # Perusahaan Tokopedia, tapi email menggunakan subdomain / hyphen lookalike
+    result = await check_email_mx("hrd@tokopedia-recruitment.com", company_name="PT Tokopedia")
+    assert result.verdict_binary is True
+    assert result.verdict_score == 0.85
+
+
+async def test_check_email_corporate_entity_using_free_webmail_flagged():
+    # Mengaku PT formal tapi pakai @gmail.com
+    result = await check_email_mx("recruitment@gmail.com", company_name="PT Maju Makmur")
+    assert result.verdict_binary is True
+    assert result.verdict_score == 0.70
+
+
+async def test_check_email_disposable_domain_from_database(client):
+    from api.db.models import DisposableDomain
+    async with async_session_factory() as session:
+        session.add(DisposableDomain(domain="custom-disposable-xyz.org", source="test"))
+        await session.commit()
+
+        result = await check_email_mx("test@custom-disposable-xyz.org", db=session)
+        assert result.verdict_binary is True
+        assert result.verdict_score == 0.95
+
+
+async def test_sync_disposable_domains_service(monkeypatch, client):
+    from api.services.disposable_sync import sync_disposable_domains_from_github
+    from api.db.repository import DisposableDomainRepository
+
+    class FakeResponse:
+        status_code = 200
+        text = "# Sample blocklist\nfake-disposable1.com\nfake-disposable2.com\n"
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    async with async_session_factory() as session:
+        added = await sync_disposable_domains_from_github(session)
+        assert added >= 2
+
+        repo = DisposableDomainRepository(session)
+        assert await repo.is_disposable("fake-disposable1.com") is True
+        assert await repo.is_disposable("fake-disposable2.com") is True
+
+
 # ---------- blacklist.py: validator ASLI (pakai DB) ----------
 
 async def test_check_blacklist_phone_not_reported_returns_low_score(client):
@@ -136,7 +196,8 @@ async def test_mock_ahu_always_returns_neutral():
     result = await check_company_ahu("PT Apapun Saja")
     assert result.verdict_score == 0.5
     assert result.verdict_binary is None
-    assert result.source == "mock_ahu"
+    assert result.source == "companyhouse.id"
+
 
 
 async def test_mock_linkedin_always_returns_neutral():

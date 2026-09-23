@@ -123,7 +123,8 @@ async def test_detect_stores_validator_scores_from_extracted_email(client):
     field 'email') harus tetap divalidasi lewat DNS MX, dan hasilnya
     (v_email) tersimpan ke DB.
     """
-    text = "Lowongan dari PT Contoh, hub hr@gmail.com untuk info"
+    # Email dengan domain korporasi mandiri yang valid (memiliki MX)
+    text = "Lowongan dari PT Contoh, hub hr@sejahtera.com untuk info"
     response = client.post("/v1/detect", data={"text": text})
     assert response.status_code == 200
     request_id = response.json()["request_id"]
@@ -132,7 +133,7 @@ async def test_detect_stores_validator_scores_from_extracted_email(client):
         repo = DetectionRepository(session)
         record = await repo.get_by_id(request_id)
 
-    # gmail.com punya MX record valid -> v_email harus rendah (tidak mencurigakan)
+    # sejahtera.com punya MX record valid dan bukan free/disposable webmail -> v_email rendah
     assert record.v_email is not None
     assert record.v_email < 0.5
 
