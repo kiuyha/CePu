@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   HelpCircle, 
   DollarSign, 
@@ -8,10 +8,48 @@ import {
   Search, 
   Eye, 
   Lock, 
-  UserCheck 
+  UserCheck,
+  BookOpen,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
+import { getPublishedEducationArticles } from '../api';
+import type { EducationArticle } from '../types';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 export const EducationPage: React.FC = () => {
+  const [articles, setArticles] = useState<EducationArticle[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    getPublishedEducationArticles()
+      .then((data) => {
+        if (mounted) {
+          setArticles(data);
+          // Secara default buka artikel pertama jika ada
+          if (data.length > 0) {
+            setExpandedId(data[0].id);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Gagal memuat artikel dari database, menggunakan fallback statis:', err);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const toggleExpand = (id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  };
+
   return (
     <div>
       <h1 className="page-hero-title">
@@ -22,6 +60,96 @@ export const EducationPage: React.FC = () => {
         Pelajari ciri-ciri lowongan palsu, cara kerjanya, dan bagaimana melindungi diri Anda.
       </p>
 
+      {/* Loading Indicator */}
+      {loading && (
+        <div style={{ textAlign: 'center', padding: '16px', color: 'var(--secondary-text)', fontSize: '14px' }}>
+          Memuat panduan terkini...
+        </div>
+      )}
+
+      {/* Dynamic Articles from Database if available */}
+      {!loading && articles.length > 0 ? (
+        <div style={{ marginBottom: '36px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+            <BookOpen size={20} color="#3898EC" />
+            <h2 style={{ fontSize: '18px', fontWeight: 800, margin: 0 }}>Panduan & Artikel Resmi</h2>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            {articles.map((art) => {
+              const isExpanded = expandedId === art.id;
+              return (
+                <div
+                  key={art.id}
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '16px',
+                    padding: '18px 20px',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <div
+                    onClick={() => toggleExpand(art.id)}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <div>
+                      <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 6px 0', color: 'var(--primary-text)' }}>
+                        {art.title}
+                      </h3>
+                      {art.tags && art.tags.length > 0 && (
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          {art.tags.map((tag, idx) => (
+                            <span
+                              key={idx}
+                              style={{
+                                fontSize: '11px',
+                                background: 'rgba(56, 152, 236, 0.1)',
+                                color: '#3898EC',
+                                padding: '2px 8px',
+                                borderRadius: '12px',
+                                fontWeight: 500,
+                              }}
+                            >
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--secondary-text)',
+                        cursor: 'pointer',
+                        padding: '4px',
+                      }}
+                    >
+                      {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                    </button>
+                  </div>
+
+                  {isExpanded && (
+                    <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)' }}>
+                      <MarkdownRenderer content={art.body_md} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Fallback Static Cards / Overview */}
       {/* Apa Itu Penipuan Lowongan Kerja */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '8px' }}>
         <div style={{

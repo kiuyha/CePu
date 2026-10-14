@@ -31,6 +31,16 @@ beautifulsoup4==4.15.0
 transformers==4.44.2
 # torch==2.4.1
 
+# --- Anti-ban transport: TLS fingerprint Chrome asli (ringan, tanpa browser) ---
+# Dipakai companyhouse/kredibel via services/anti_ban.impersonated_session.
+curl-cffi==0.16.3
+
+# --- Anti-ban opsional: browser asli (Playwright) ---
+# HANYA untuk scripts/refresh_browser_sessions.py dan fallback terakhir
+# fetch_with_browser() — bukan dependency wajib request path.
+# Aktifkan dengan: pip install playwright && playwright install chromium
+# playwright==1.49.1
+
 # --- dev/test dependencies ---
 pytest==8.3.3
 pytest-asyncio==0.24.0

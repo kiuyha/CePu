@@ -1,4 +1,5 @@
 """Mesin status bot WhatsApp: menu, parsing, format balasan."""
+import re
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
@@ -10,8 +11,7 @@ from ..core.errors import ModelNotReadyError
 from ..db.repository import EducationArticleRepository, ReportRepository, WaSessionRepository
 from .detection_pipeline import DetectionOutcome, run_detection_pipeline
 from .entity_extraction import extract_entities
-
-FOOTER = "\n\n---\n_Layanan ini adalah prototipe riset, bukan produk resmi._"
+from .job_service import get_or_fetch_jobs
 
 STATUS_LABEL = {
     "rendah": "🟢 AMAN (Tingkat Risiko Penipuan Rendah)",
@@ -25,7 +25,8 @@ MAIN_MENU_TEXT = (
     "1️⃣ Edukasi – Belajar cara mengenali lowongan kerja palsu.\n"
     "2️⃣ Lapor – Laporkan lowongan kerja mencurigakan.\n"
     "3️⃣ Deteksi – Cek apakah lowongan kerja yang kamu terima palsu atau aman.\n\n"
-    "Balas dengan 1, 2, atau 3 sesuai pilihanmu."
+    "Balas dengan 1, 2, atau 3 sesuai pilihanmu.\n"
+    "Atau ketik /job <posisi> untuk cari lowongan yang mirip."
 )
 
 EDUCATION_TEXT = (
@@ -73,30 +74,74 @@ HELP_TEXT = (
     "1 = Edukasi mengenali penipuan loker\n"
     "2 = Laporkan lowongan kerja mencurigakan\n"
     "3 = Deteksi apakah lowongan aman atau penipuan\n"
+    "'/job <posisi>' = cari lowongan mirip (mis. '/job driver di Jakarta')\n"
     "'reset' = mulai ulang dari menu awal\n"
     "'bantuan' = tampilkan pesan ini lagi\n\n"
     "Tips: Kamu juga bisa langsung mengirimkan teks lowongan kerja kapan saja!"
 )
 
+# Intent on-demand: "/job <posisi> [di <lokasi>]" ("cari kerja ..." tetap didukung)
+JOB_SEARCH_RE = re.compile(
+    r"^(?:/job\b|cari\s+(?:kerja|loker|pekerjaan|lowongan)|lowongan\s+mirip)\b[\s:,\-–]*([\s\S]*)$",
+    re.IGNORECASE,
+)
 
-def _with_footer(text: str) -> str:
-    return text + FOOTER
+
+def _parse_job_search_intent(text: str) -> Optional[tuple[str, Optional[str]]]:
+    """Kembalikan (role, location) jika pesan adalah permintaan cari kerja, else None."""
+    m = JOB_SEARCH_RE.match(text.strip())
+    if not m:
+        return None
+    rest = (m.group(1) or "").strip(" :,-–\t")
+    if not rest:
+        return None
+    # "cari pekerjaan yang mirip" tanpa posisi -> bukan role, minta klarifikasi.
+    rest = re.sub(r"\byang\s+mirip\b", "", rest, flags=re.IGNORECASE).strip(" :,-–\t")
+    if not rest or rest.lower() == "mirip":
+        return None
+    # "driver di Jakarta" -> ("driver", "Jakarta"); "driver" -> ("driver", None)
+    parts = re.split(r"\s+di\s+", rest, maxsplit=1, flags=re.IGNORECASE)
+    role = parts[0].strip()
+    location = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    if not role:
+        return None
+    return role, location
+
+
+def _format_job_results(role: str, jobs: list[dict]) -> str:
+    if not jobs:
+        return (
+            f"🔎 Tidak menemukan lowongan '{role}' saat ini. "
+            "Coba kata kunci lain (mis. 'cari kerja driver')."
+        )
+    lines = [f"🔎 Lowongan mirip '{role}':"]
+    for i, job in enumerate(jobs[:5], start=1):
+        title = job.get("title") or "(tanpa judul)"
+        company = job.get("company") or ""
+        head = f"*{title}*" + (f" — {company}" if company else "")
+        lines.append(f"\n{i}. {head}")
+        if job.get("url"):
+            lines.append(f"   🔗 {job['url']}")
+    return "\n".join(lines)
 
 
 def _format_detection_result(outcome: DetectionOutcome) -> str:
     status_label = STATUS_LABEL.get(outcome.category, "⚪ STATUS TIDAK DIKETAHUI")
 
-    lines = [f"Status: {status_label}", "Alasan Terindikasi:"]
+    lines = [f"Status: {status_label}"]
+
+    stats = outcome.report_stats or {}
+    if isinstance(stats, dict) and stats.get("total", 0) > 0:
+        verified = stats.get("verified", 0)
+        extra = f" ({verified} terverifikasi)" if verified else ""
+        lines.append(f"🚨 Dilaporkan oleh {stats['total']} pengguna{extra}.")
+
+    lines.append("Alasan Terindikasi:")
     if outcome.reasons:
         for i, reason in enumerate(outcome.reasons, start=1):
             lines.append(f"  {i}. {reason}")
     else:
         lines.append("  - Tidak ditemukan indikator penipuan yang mencurigakan.")
-
-    if outcome.alternatives:
-        lines.append("Rekomendasi Lowongan yang Lebih Aman:")
-        for i, alt in enumerate(outcome.alternatives, start=1):
-            lines.append(f"  {i}. {alt['title']} {alt['company']}")
 
     if outcome.degraded_sources:
         lines.append(
@@ -124,6 +169,16 @@ def _looks_like_direct_detection_input(text: str) -> bool:
     return bool(entities.phones or entities.emails or entities.companies)
 
 
+def _has_report_signal(text: str) -> bool:
+    """True jika pesan layak diproses (laporan/deteksi): cukup panjang atau
+    memuat minimal satu entitas (HP/email/perusahaan)."""
+    stripped = text.strip()
+    if len(stripped) >= 30:
+        return True
+    entities = extract_entities(stripped)
+    return bool(entities.phones or entities.emails or entities.companies)
+
+
 async def handle_inbound_message(
     *,
     phone_hash: str,
@@ -139,13 +194,60 @@ async def handle_inbound_message(
 
     if stripped_lower == "reset":
         await session_repo.delete(phone_hash)
-        return _with_footer("🔄 Sesi direset.\n\n" + MAIN_MENU_TEXT)
+        return "🔄 Sesi direset.\n\n" + MAIN_MENU_TEXT
 
     if stripped_lower == "bantuan":
-        return _with_footer(HELP_TEXT)
+        return HELP_TEXT
+
+    # Perintah menu 1/2/3 selalu menang — bahkan saat user sedang di tengah
+    # alur lain (mis. mengetik "3" saat diminta detail laporan harus pindah
+    # ke Deteksi, bukan mem-filing "3" sebagai laporan).
+    if stripped_lower == "1":
+        article_repo = EducationArticleRepository(db)
+        articles = await article_repo.list_published(limit=3)
+        await session_repo.upsert(phone_hash, current_state="idle")
+        edu_content = [EDUCATION_TEXT]
+        if articles:
+            edu_content.append("\n📚 Artikel & Tips Terkini:")
+            for a in articles:
+                edu_content.append(f"• {a.title}")
+        return "\n".join(edu_content)
+
+    if stripped_lower == "2":
+        await session_repo.upsert(phone_hash, current_state="awaiting_report")
+        return REPORT_GUIDE_TEXT
+
+    if stripped_lower == "3":
+        await session_repo.upsert(phone_hash, current_state="awaiting_detect")
+        return DETECTION_GUIDE_TEXT
+
+    # On-demand job search ("cari kerja ...") — hanya saat user eksplisit meminta.
+    # DB-first: scrape hanya kalau belum tersimpan.
+    job_intent = _parse_job_search_intent(msg_body)
+    if job_intent is not None:
+        role, location = job_intent
+        await session_repo.upsert(phone_hash, current_state="idle")
+        try:
+            jobs, _source = await get_or_fetch_jobs(
+                role=role, location=location, limit=5, db=db, settings=settings
+            )
+        except Exception:
+            jobs = []
+        return _format_job_results(role, jobs)
+
+    if re.match(
+        r"^(?:/job\b|cari\s+(?:kerja|loker|pekerjaan|lowongan)|lowongan\s+mirip)\b",
+        stripped_lower,
+    ):
+        # Perintah tanpa posisi -> minta klarifikasi, jangan scrape membabi buta.
+        await session_repo.upsert(phone_hash, current_state="idle")
+        return (
+            "Mau cari kerja apa? Balas dengan: */job <posisi>*\n"
+            "Contoh: '/job driver di Jakarta'."
+        )
 
     if msg_type == "image":
-        return _with_footer(
+        return (
             "Maaf, deteksi lewat gambar via WhatsApp belum didukung saat ini. "
             "Silakan ketik ulang teks lowongannya langsung."
         )
@@ -157,15 +259,29 @@ async def handle_inbound_message(
         current_state = "idle"
 
     if current_state == "awaiting_report":
+        # Jangan filing sampah ("3", "ok", "test") sebagai laporan —
+        # tetap di state yang sama dan minta data beneran.
+        if not _has_report_signal(msg_body):
+            return (
+                "Hmm, pesannya sepertinya belum lengkap. 🙏\n"
+                "Kirim nomor HP / email / nama perusahaan / kronologi "
+                "lowongannya ya — atau ketik 1, 2, 3 untuk pindah menu."
+            )
         report_repo = ReportRepository(db)
         report = await report_repo.create(channel="wa", message_raw=msg_body, status="pending")
         await session_repo.upsert(phone_hash, current_state="idle")
-        return _with_footer(
+        return (
             f"✅ Laporan diterima (id: {report.id[:8]}...). Terima kasih sudah membantu "
             "komunitas terhindar dari penipuan lowongan kerja."
         )
 
     if current_state == "awaiting_detect":
+        # Sama: jangan habiskan sekali inferensi BERT untuk "ok"/stiker.
+        if not _has_report_signal(msg_body):
+            return (
+                "Teksnya sepertinya kurang lengkap untuk dianalisis. 🔎\n"
+                "Kirim teks lowongannya ya — atau ketik 1, 2, 3 untuk pindah menu."
+            )
         await session_repo.upsert(phone_hash, current_state="idle")
         try:
             outcome = await run_detection_pipeline(
@@ -174,8 +290,8 @@ async def handle_inbound_message(
                 on_progress=on_progress,
             )
         except ModelNotReadyError:
-            return _with_footer("⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya.")
-        return _with_footer(_format_detection_result(outcome))
+            return "⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya."
+        return _format_detection_result(outcome)
 
     if _looks_like_direct_detection_input(msg_body):
         await session_repo.upsert(phone_hash, current_state="idle")
@@ -186,27 +302,8 @@ async def handle_inbound_message(
                 on_progress=on_progress,
             )
         except ModelNotReadyError:
-            return _with_footer("⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya.")
-        return _with_footer(_format_detection_result(outcome))
-
-    if stripped_lower == "1":
-        article_repo = EducationArticleRepository(db)
-        articles = await article_repo.list_published(limit=3)
-        await session_repo.upsert(phone_hash, current_state="idle")
-        edu_content = [EDUCATION_TEXT]
-        if articles:
-            edu_content.append("\n📚 Artikel & Tips Terkini:")
-            for a in articles:
-                edu_content.append(f"• {a.title}")
-        return _with_footer("\n".join(edu_content))
-
-    if stripped_lower == "2":
-        await session_repo.upsert(phone_hash, current_state="awaiting_report")
-        return _with_footer(REPORT_GUIDE_TEXT)
-
-    if stripped_lower == "3":
-        await session_repo.upsert(phone_hash, current_state="awaiting_detect")
-        return _with_footer(DETECTION_GUIDE_TEXT)
+            return "⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya."
+        return _format_detection_result(outcome)
 
     await session_repo.upsert(phone_hash, current_state="idle")
-    return _with_footer(MAIN_MENU_TEXT)
+    return MAIN_MENU_TEXT

@@ -93,6 +93,12 @@ async def fake_redis():
     fake = fakeredis_aioredis.FakeRedis(decode_responses=True)
     await fake.flushall()
 
+    # Isolasi circuit breaker antar-test (registry global di anti_ban).
+    from api.services.anti_ban import reset_breaker, reset_throttle
+
+    reset_breaker()
+    reset_throttle()
+
     app.dependency_overrides[get_redis_client] = lambda: fake
 
     yield fake

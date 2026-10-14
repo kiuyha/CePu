@@ -12,6 +12,8 @@ from bs4 import BeautifulSoup
 
 from ...core.config import Settings, get_settings
 
+from ..anti_ban import throttle
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +39,13 @@ class KredibelScraper:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self._init_cookies()
+        from ..anti_ban import get_breaker
+
+        self._breaker = get_breaker(
+            "kredibel",
+            self.settings.scrape_circuit_threshold,
+            self.settings.scrape_circuit_cooldown_seconds,
+        )
 
     def _init_cookies(self) -> None:
         if self.settings.kredibel_session_cookie:
@@ -141,17 +150,94 @@ class KredibelScraper:
         if not clean_num:
             return None
 
+        if not self._breaker.allow():
+            logger.info("kredibel.com di-skip (circuit terbuka).")
+            return None
+
+        throttle(
+            "kredibel",
+            self.settings.scrape_min_interval_seconds,
+            self.settings.scrape_jitter_seconds,
+        )
+
         url = f"{self.settings.kredibel_base_url.rstrip('/')}/phone/id/{clean_num}"
         logger.info("Fetching kredibel.com profile: %s", url)
 
-        # Coba jalankan via curl --http2 jika curl tersedia
+        # 1. Impersonasi Chrome (JA3 asli) — paling sulit di-flag.
+        try:
+            result = self._fetch_via_impersonated(url)
+            if result is not None:
+                return result
+        except ImportError:
+            pass
+
+        # 2. curl sistem via HTTP/2, lalu 3. httpx.
         curl_path = shutil.which("curl")
         if curl_path:
             return self._fetch_via_curl(url, curl_path)
         else:
             return self._fetch_via_httpx(url)
 
+    def _fetch_via_impersonated(self, url: str) -> Optional[dict[str, Any]]:
+        from ..anti_ban import classify_ban, impersonated_session, proxy_map
+
+        try:
+            session = impersonated_session(
+                headers=self._browser_headers(),
+                cookies=dict(self._active_cookies),
+                timeout=self.settings.kredibel_timeout_seconds,
+                proxies=proxy_map(self.settings.kredibel_proxy),
+            )
+            resp = session.get(url, allow_redirects=False)
+        except Exception as exc:
+            logger.warning("Kredibel impersonated fetch gagal untuk %s: %s", url, exc)
+            return None
+
+        from ..anti_ban import iter_cookie_pairs
+
+        for name, value in iter_cookie_pairs(getattr(resp, "cookies", None)):
+            self._active_cookies[name] = value
+
+        if resp.status_code == 200:
+            self._breaker.record_success()
+            return self.parse_kredibel_page(resp.text)
+
+        location = ""
+        try:
+            location = (resp.headers.get("location") or "").lower()
+        except Exception:
+            pass
+        kind = classify_ban(status_code=resp.status_code, body_snippet=(resp.text or "")[:2000])
+        if kind in ("challenge", "blocked", "rate_limited", "server_error"):
+            self._breaker.record_failure()
+        if resp.status_code in (301, 302, 303, 307, 308) and "login" in location:
+            # Info saja (bukan warning): transport berikutnya akan
+            # mengeluarkan warning resmi bila ikut gagal.
+            logger.info("Kredibel impersonated kena redirect login untuk %s.", url)
+        else:
+            logger.warning("Kredibel impersonated HTTP %d [%s]", resp.status_code, kind)
+        return None
+
+    def _browser_headers(self) -> dict[str, str]:
+        # Header attestasi browser (cf. kasus JobStreet): tanpa ini request
+        # terlihat seperti "TLS browser tapi bisu", mudah di-flag WAF.
+        # Versi diselaraskan dengan kredibel_user_agent (Chrome 153, Android).
+        return {
+            "user-agent": self.settings.kredibel_user_agent,
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+            "sec-ch-ua": '"Chromium";v="153", "Not_A Brand";v="8", "Google Chrome";v="153"',
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": '"Android"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "upgrade-insecure-requests": "1",
+        }
+
     def _fetch_via_curl(self, url: str, curl_path: str) -> Optional[dict[str, Any]]:
+        from ..anti_ban import classify_ban
+
         cookie_header = self._get_cookie_header_string()
         cmd = [
             curl_path,
@@ -159,10 +245,14 @@ class KredibelScraper:
             "-i",  # include headers
             "-s",
             url,
-            "-H", f"user-agent: {self.settings.kredibel_user_agent}",
             "--compressed",
             "--max-time", str(self.settings.kredibel_timeout_seconds),
         ]
+        proxy = (self.settings.kredibel_proxy or "").strip()
+        if proxy:
+            cmd.extend(["-x", proxy])
+        for key, value in self._browser_headers().items():
+            cmd.extend(["-H", f"{key}: {value}"])
         if cookie_header:
             cmd.extend(["-H", f"cookie: {cookie_header}"])
 
@@ -196,6 +286,7 @@ class KredibelScraper:
                         break
 
             if status_code == 200:
+                self._breaker.record_success()
                 return self.parse_kredibel_page(body)
             elif status_code in (301, 302, 303, 307, 308):
                 # Check Location header to detect login redirect
@@ -204,37 +295,50 @@ class KredibelScraper:
                     if line.lower().startswith("location:"):
                         location = line.split(":", 1)[1].strip().lower()
                         break
+                kind = classify_ban(status_code=status_code, body_snippet=body[:2000])
+                if kind in ("challenge", "blocked", "rate_limited", "server_error"):
+                    self._breaker.record_failure()
                 if "login" in location or "login" in body.lower():
                     logger.warning(
                         "Kredibel redirected to login: session cookie might be expired. "
                         "Update KREDIBEL_SESSION_COOKIE in your .env file."
                     )
                 else:
-                    logger.warning("Kredibel returned HTTP %d (redirect to: %s)", status_code, location)
+                    logger.warning("Kredibel returned HTTP %d [%s] (redirect to: %s)", status_code, kind, location)
                 return None
             else:
-                logger.warning("Kredibel returned HTTP %d", status_code)
+                kind = classify_ban(status_code=status_code, body_snippet=body[:2000])
+                if kind in ("challenge", "blocked", "rate_limited", "server_error"):
+                    self._breaker.record_failure()
+                logger.warning("Kredibel returned HTTP %d [%s]", status_code, kind)
                 return None
         except Exception as exc:
+            self._breaker.record_failure()
             logger.warning("Kredibel curl fetch failed for %s: %s", url, exc)
             return None
 
     def _fetch_via_httpx(self, url: str) -> Optional[dict[str, Any]]:
         import httpx
-        headers = {
-            "user-agent": self.settings.kredibel_user_agent,
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
+
+        from ..anti_ban import classify_ban, proxy_map
+
+        headers = self._browser_headers()
         cookies = dict(self._active_cookies)
+        proxy = (self.settings.kredibel_proxy or "").strip() or None
 
         try:
-            with httpx.Client(http2=True, timeout=self.settings.kredibel_timeout_seconds) as client:
+            with httpx.Client(http2=True, timeout=self.settings.kredibel_timeout_seconds, proxy=proxy) as client:
                 resp = client.get(url, headers=headers, cookies=cookies, follow_redirects=True)
                 for k, v in resp.cookies.items():
                     self._active_cookies[k] = v
                 if resp.status_code == 200:
+                    self._breaker.record_success()
                     return self.parse_kredibel_page(resp.text)
+                kind = classify_ban(status_code=resp.status_code, body_snippet=resp.text[:2000])
+                if kind in ("challenge", "blocked", "rate_limited", "server_error"):
+                    self._breaker.record_failure()
                 return None
         except Exception as exc:
+            self._breaker.record_failure()
             logger.warning("Kredibel httpx fetch failed for %s: %s", url, exc)
             return None

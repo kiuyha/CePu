@@ -9,8 +9,7 @@ import pytest
 from api.services.validators.base import ValidatorUnavailable, call_with_retry
 from api.services.validators.dns_mx import check_email_mx
 from api.services.validators.blacklist import check_blacklist
-from api.services.validators.ahu import check_company_ahu
-from api.services.validators.linkedin import check_company_linkedin
+from api.services.validators.companyhouse import check_company_legalitas
 from api.services.validators.orchestrator import run_validators
 from api.db.base import async_session_factory
 from api.db.repository import ReportRepository
@@ -190,20 +189,15 @@ async def test_check_blacklist_caches_result_in_intel_blacklist_table(client):
     assert entry is not None
 
 
-# ---------- ahu.py & linkedin.py: mock, selalu netral ----------
+# ---------- companyhouse.py: validator legalitas perusahaan ----------
 
-async def test_mock_ahu_always_returns_neutral():
-    result = await check_company_ahu("PT Apapun Saja")
+async def test_companyhouse_unknown_company_returns_neutral():
+    """Perusahaan yang tidak ditemukan di companyhouse.id → skor netral 0.5."""
+    result = await check_company_legalitas("PT Apapun Saja")
     assert result.verdict_score == 0.5
     assert result.verdict_binary is None
     assert result.source == "companyhouse.id"
 
-
-
-async def test_mock_linkedin_always_returns_neutral():
-    result = await check_company_linkedin("PT Apapun Saja")
-    assert result.verdict_score == 0.5
-    assert result.source == "mock_linkedin"
 
 
 # ---------- orchestrator.py: integrasi penuh ----------
@@ -240,11 +234,11 @@ async def test_run_validators_with_no_fields_returns_neutral_and_not_degraded(cl
     assert output.degraded_sources == []
 
 
-async def test_run_validators_combines_ahu_linkedin_and_registry_for_v_company(client, fake_redis):
+async def test_run_validators_combines_companyhouse_and_registry_for_v_company(client, fake_redis):
     """
-    Karena AHU dan LinkedIn mock netral (0.5), dan company_registry juga
-    netral untuk perusahaan yang belum pernah di-seed (0.5), V_company
-    harus tetap 0.5 (rata-rata dari tiga angka 0.5).
+    Karena companyhouse.id mock netral (0.5) untuk perusahaan tidak dikenal,
+    dan company_registry juga netral (0.5), V_company harus tetap 0.5
+    (rata-rata dari dua sumber: companyhouse + registry).
     """
     cache = VerificationCache(fake_redis)
     async with async_session_factory() as session:
@@ -331,3 +325,30 @@ async def test_run_validators_marks_degraded_when_source_fails_and_cache_empty(
 
     assert output.v_email == 0.5  # nilai netral
     assert "dns_mx" in output.degraded_sources
+
+
+async def test_run_validators_concurrent_no_session_race(client, fake_redis):
+    """Regresi IllegalStateChangeError production (/internal/wa/inbound 500).
+
+    Cabang-cabang asyncio.gather di run_validators tidak boleh memakai satu
+    AsyncSession bersama — tiap cabang wajib session sendiri. Test ini
+    menghantam orchestrator secara konkuren; sebelum fix, session rebutan
+    dan teardown melempar IllegalStateChangeError.
+    """
+    cache = VerificationCache(fake_redis)
+    async with async_session_factory() as session:
+        outputs = await asyncio.gather(*[
+            run_validators(
+                company=f"PT Conc {i}",
+                phone=f"081200001{i:02d}",
+                email=f"conc{i}@gmail.com",
+                db=session,
+                cache=cache,
+            )
+            for i in range(6)
+        ])
+    assert len(outputs) == 6
+    for output in outputs:
+        assert 0.0 <= output.v_company <= 1.0
+        assert 0.0 <= output.v_phone <= 1.0
+        assert 0.0 <= output.v_email <= 1.0

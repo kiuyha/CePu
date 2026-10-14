@@ -105,6 +105,11 @@ class JobAlternative(Base):
     title: Mapped[str] = mapped_column(String(255))
     url: Mapped[str] = mapped_column(String(500))
     verified_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Kolom hasil scraper JobStreet (nullable agar baris lama tetap valid).
+    # `role` = kata kunci pencarian saat lowongan disimpan (mis. "driver").
+    role: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    salary_display: Mapped[str | None] = mapped_column(String(255), nullable=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     active: Mapped[bool] = mapped_column(default=True)
 

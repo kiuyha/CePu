@@ -9,6 +9,8 @@ import requests
 
 from ...core.config import Settings, get_settings
 
+from ..anti_ban import throttle
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +59,11 @@ class AduanNomorClient:
         }
         """
         calling_code, phone_number = parse_phone_number(phone)
+        throttle(
+            "aduannomor",
+            self.settings.scrape_min_interval_seconds,
+            self.settings.scrape_jitter_seconds,
+        )
         url = f"{self.settings.aduannomor_base_url.rstrip('/')}/api/v.1/ticket/phone-check"
 
         headers = {
@@ -93,4 +100,5 @@ class AduanNomorClient:
                 return None
         except Exception as exc:
             logger.warning("aduannomor.id request failed for phone %s: %s", phone, exc)
-            raise exc
+            # Jangan re-raise: caller (phone_checker.py) sudah menangkap Exception.
+            return None

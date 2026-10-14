@@ -4,8 +4,12 @@ from typing import Awaitable, Callable, TypeVar
 
 T = TypeVar("T")
 
-DEFAULT_TIMEOUT_SECONDS = 1.0
-RETRY_DELAY_SECONDS = 0.3
+# Timeout default untuk validator eksternal yang menggunakan HTTP scraper.
+# Nilai 1.0 detik terlalu kecil; scraper companyhouse (~5s), aduannomor (~5s),
+# dan kredibel (~6s) membutuhkan waktu lebih lama. Kita set 12s sebagai batas
+# aman yang melingkupi semua konfigurasi timeout scraper + overhead jaringan.
+DEFAULT_TIMEOUT_SECONDS = 12.0
+RETRY_DELAY_SECONDS = 0.5
 
 
 class ValidatorUnavailable(Exception):

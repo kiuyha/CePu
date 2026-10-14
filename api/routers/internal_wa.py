@@ -57,6 +57,8 @@ async def wa_inbound(
     import json
     from fastapi.responses import StreamingResponse
 
+    from ..db.base import async_session_factory
+
     queue = asyncio.Queue()
 
     async def _progress_callback(stage: str, message: str, percent: int):
@@ -68,21 +70,26 @@ async def wa_inbound(
         })
 
     async def _worker():
-        try:
-            reply = await handle_inbound_message(
-                phone_hash=payload.phone_hash,
-                msg_type=payload.msg.type,
-                msg_body=payload.msg.body,
-                db=db,
-                redis_client=redis_client,
-                settings=settings,
-                on_progress=_progress_callback,
-            )
-            await queue.put({"type": "result", "reply": reply})
-        except Exception as e:
-            await queue.put({"type": "error", "message": str(e)})
-        finally:
-            await queue.put(None)
+        # Session sendiri untuk background task: session `db` milik request
+        # bisa ditutup saat koneksi stream terputus, persis seperti pola
+        # endpoint /v1/detect/stream. Memakai session request di sini
+        # menyebabkan IllegalStateChangeError saat teardown.
+        async with async_session_factory() as task_db:
+            try:
+                reply = await handle_inbound_message(
+                    phone_hash=payload.phone_hash,
+                    msg_type=payload.msg.type,
+                    msg_body=payload.msg.body,
+                    db=task_db,
+                    redis_client=redis_client,
+                    settings=settings,
+                    on_progress=_progress_callback,
+                )
+                await queue.put({"type": "result", "reply": reply})
+            except Exception as e:
+                await queue.put({"type": "error", "message": str(e)})
+            finally:
+                await queue.put(None)
 
     asyncio.create_task(_worker())
 

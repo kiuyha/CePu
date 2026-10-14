@@ -1,6 +1,9 @@
 """
-Validator AHU / CompanyHouse (legalitas nama perusahaan).
-Menggunakan companyhouse.id scraper berbasis session HTTP dan menyimpan hasil ke company_registry DB.
+Validator legalitas nama perusahaan via companyhouse.id.
+Menggunakan scraper HTTP berbasis session dan menyimpan hasil ke company_registry DB.
+
+Catatan: sebelumnya file ini bernama ahu.py — AHU Online tidak digunakan karena
+memerlukan CAPTCHA dan login. Sumber sebenarnya adalah companyhouse.id.
 """
 import asyncio
 from datetime import datetime, timezone
@@ -16,12 +19,14 @@ from .companyhouse_scraper import CompanyHouseScraper
 logger = logging.getLogger(__name__)
 
 
-async def check_company_ahu(company_name: str, db: Optional[AsyncSession] = None) -> VerificationResult:
+async def check_company_legalitas(
+    company_name: str, db: Optional[AsyncSession] = None
+) -> VerificationResult:
     """
-    Pengecekan legalitas perusahaan:
+    Pengecekan legalitas perusahaan via companyhouse.id:
     1. Cek database lokal `company_registry` terlebih dahulu.
     2. Jika belum ada atau belum terdaftar, scraper companyhouse.id dijalankan.
-    3. Jika ditemukan di companyhouse.id, update data ke database `company_registry` dan berikan skor valid.
+    3. Jika ditemukan di companyhouse.id, simpan ke database dan kembalikan skor aman.
     """
     if not company_name or not company_name.strip():
         return VerificationResult(
@@ -94,3 +99,6 @@ async def check_company_ahu(company_name: str, db: Optional[AsyncSession] = None
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
 
+
+# Alias backward-compat untuk test lama yang masih pakai nama check_company_ahu
+check_company_ahu = check_company_legalitas

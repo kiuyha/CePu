@@ -4,10 +4,11 @@ Scraper modular untuk companyhouse.id dengan session-based HTTP workflow.
 import logging
 import re
 from typing import Any, Optional
-import requests
 from bs4 import BeautifulSoup
 
 from ...core.config import Settings, get_settings
+
+from ..anti_ban import throttle
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +16,13 @@ logger = logging.getLogger(__name__)
 def generate_company_slug(company_name: str) -> str:
     """
     Mengubah nama perusahaan menjadi slug URL (misal: PT. Makna Jaya Pratama -> makna-jaya-pratama).
+    Baris pertama saja yang dipakai jika company_name mengandung newline (misalnya hasil ekstraksi
+    regex yang tidak dibatasi per-baris).
     """
+    # Ambil hanya baris pertama — amankan dari hasil regex yang menelan newline
+    company_name = company_name.split('\n')[0].strip()
     clean = re.sub(r'^(PT|CV|Perum|UD|Firma|Yayasan)\.?\s+', '', company_name, flags=re.IGNORECASE)
-    clean = re.sub(r'[\.\,\(\)\&]', ' ', clean)
+    clean = re.sub(r'[\.\,\(\)\&\/\\]', ' ', clean)
     clean = re.sub(r'\s+', '-', clean).strip('-').lower()
     return clean
 
@@ -28,14 +33,40 @@ class CompanyHouseScraper:
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
-        self.session = requests.Session()
+        # Transport impersonasi Chrome (JA3 asli) — jauh lebih sulit di-flag
+        # daripada python-requests. Fallback ke requests bila curl_cffi
+        # belum terinstal (pip install curl_cffi).
+        from ..anti_ban import proxy_map
+
+        proxies = proxy_map(self.settings.companyhouse_proxy)
+        try:
+            from ..anti_ban import impersonated_session
+
+            self.session = impersonated_session(proxies=proxies)
+        except ImportError:
+            import requests
+
+            logger.warning("curl_cffi tidak ada — pakai requests (mudah di-flag WAF).")
+            self.session = requests.Session()
+            if proxies:
+                self.session.proxies.update(proxies)
         self._configure_session()
 
     def _configure_session(self) -> None:
+        # Meniru header browser desktop: tanpa sec-fetch-*/sec-ch-ua*,
+        # WAF gampang menandai request sebagai script (cf. kasus JobStreet
+        # yang menjawab UNSTABLE_QUERY_ERROR). Tidak ada secret di sini.
         self.session.headers.update({
             "User-Agent": self.settings.companyhouse_user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
+            "Sec-Ch-Ua": '"Chromium";v="128", "Not_A Brand";v="8", "Google Chrome";v="128"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Linux"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Upgrade-Insecure-Requests": "1",
         })
         # 1. Pasang cookie dari environment variable jika ada
         if self.settings.companyhouse_session_cookie:
@@ -50,11 +81,16 @@ class CompanyHouseScraper:
         for k, v in self._active_cookies.items():
             self.session.cookies.set(k, v)
 
-    def _update_cookies_from_response(self, resp: requests.Response) -> None:
+    def _update_cookies_from_response(self, resp) -> None:
         """Menyimpan cookie baru yang dikirim server via set-cookie."""
-        for c in resp.cookies:
-            self._active_cookies[c.name] = c.value
-            self.session.cookies.set(c.name, c.value)
+        from ..anti_ban import iter_cookie_pairs
+
+        for name, value in iter_cookie_pairs(getattr(resp, "cookies", None)):
+            self._active_cookies[name] = value
+            try:
+                self.session.cookies.set(name, value)
+            except Exception:
+                pass
 
     def parse_company_page(self, html_content: str, default_name: str = "") -> dict[str, Any]:
         """
@@ -165,6 +201,25 @@ class CompanyHouseScraper:
         if not slug:
             return None
 
+        from ..anti_ban import classify_ban, get_breaker
+
+        breaker = get_breaker(
+            "companyhouse",
+            self.settings.scrape_circuit_threshold,
+            self.settings.scrape_circuit_cooldown_seconds,
+        )
+        if not breaker.allow():
+            # Jangan hantam sumber yang sedang memblokir — biarkan flag reda,
+            # caller turun ke jalur degraded (cache/netral).
+            logger.info("companyhouse.id di-skip (circuit terbuka).")
+            return None
+
+        throttle(
+            "companyhouse",
+            self.settings.scrape_min_interval_seconds,
+            self.settings.scrape_jitter_seconds,
+        )
+
         url = f"{self.settings.companyhouse_base_url.rstrip('/')}/{slug}"
         logger.info("Fetching companyhouse.id profile: %s", url)
 
@@ -176,16 +231,35 @@ class CompanyHouseScraper:
             )
             self._update_cookies_from_response(resp)
             if resp.status_code == 200:
+                breaker.record_success()
                 parsed = self.parse_company_page(resp.text, default_name=company_name)
                 return parsed
             elif resp.status_code == 404:
+                breaker.record_success()
                 logger.info("Company not found on companyhouse.id (404): %s", company_name)
                 return None
             else:
-                logger.warning(
-                    "companyhouse.id returned status %d for %s", resp.status_code, company_name
+                kind = classify_ban(
+                    status_code=resp.status_code, body_snippet=resp.text[:2000]
                 )
+                if kind in ("challenge", "blocked", "rate_limited", "server_error"):
+                    breaker.record_failure()
+                if kind == "challenge":
+                    logger.warning(
+                        "companyhouse.id menampilkan Cloudflare challenge "
+                        "(tidak bisa dilewati HTTP client). Panen clearance baru: "
+                        ".venv/bin/python scripts/refresh_browser_sessions.py "
+                        "--site companyhouse --headed --profile-dir ./sessions/chrome"
+                    )
+                else:
+                    logger.warning(
+                        "companyhouse.id returned status %d [%s] for %s",
+                        resp.status_code, kind, company_name,
+                    )
                 return None
         except Exception as exc:
+            breaker.record_failure()
             logger.warning("Error fetching companyhouse.id for %s: %s", company_name, exc)
-            raise exc
+            # Jangan re-raise: caller (companyhouse.py) sudah menangkap Exception.
+            # Re-raise menyebabkan double-log dan melempar exception melewati asyncio.to_thread.
+            return None

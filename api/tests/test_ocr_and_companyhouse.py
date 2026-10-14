@@ -10,7 +10,7 @@ from api.services.validators.companyhouse_scraper import (
     CompanyHouseScraper,
     generate_company_slug,
 )
-from api.services.validators.ahu import check_company_ahu
+from api.services.validators.companyhouse import check_company_legalitas
 from api.db.base import async_session_factory
 from api.db.repository import CompanyRegistryRepository, DetectionRepository
 
@@ -52,7 +52,7 @@ def test_companyhouse_parser_extracts_all_required_schema():
     assert "Jl. Dr. Sutomo" in data["registered_address"]
 
 
-async def test_check_company_ahu_persists_to_db(client, monkeypatch):
+async def test_check_company_legalitas_persists_to_db(client, monkeypatch):
     """
     Verifikasi jika scraper berhasil menemukan data perusahaan,
     data tersebut disimpan ke company_registry dan skor v_company menjadi 0.2.
@@ -74,7 +74,7 @@ async def test_check_company_ahu_persists_to_db(client, monkeypatch):
     )
 
     async with async_session_factory() as session:
-        result = await check_company_ahu("PT Makna Jaya Pratama", db=session)
+        result = await check_company_legalitas("PT Makna Jaya Pratama", db=session)
         assert result.verdict_score == 0.2
         assert result.verdict_binary is False
         assert result.source == "companyhouse.id"

@@ -13,6 +13,7 @@ from ..db.repository import DetectionRepository, JobAlternativeRepository
 from .anonymize import anonymize_text
 from .bert_infer import is_model_loaded, predict_fraud_probability, run_ner
 from .entity_extraction import extract_entities, extract_entities_and_features, process_job_text
+from .report_matcher import match_report_stats
 from .risk_scorer import build_reasons, compute_risk
 from .validators.orchestrator import run_validators
 
@@ -29,6 +30,8 @@ class DetectionOutcome:
     degraded_sources: list = field(default_factory=list)
     processing_ms: int = 0
     model_version: str = ""
+    # Statistik laporan pengguna yang cocok — DISPLAY ONLY, tidak masuk skor.
+    report_stats: dict = field(default_factory=dict)
 
     def to_api_response(self) -> dict:
         return {
@@ -40,6 +43,7 @@ class DetectionOutcome:
             "degraded_sources": self.degraded_sources,
             "processing_ms": self.processing_ms,
             "model_version": self.model_version,
+            "report_stats": self.report_stats,
         }
 
 
@@ -147,6 +151,19 @@ async def run_detection_pipeline(
         v_phone=validator_output.v_phone,
         v_email=validator_output.v_email,
     )
+    # Statistik laporan yang cocok — display-only, TIDAK memengaruhi risk/category.
+    try:
+        report_stats = (
+            await match_report_stats(
+                db,
+                phone=phone_to_validate,
+                email=email_to_validate,
+                company=company_to_validate,
+                text=text_to_store,
+            )
+        ).to_dict()
+    except Exception:
+        report_stats = {"total": 0, "verified": 0, "matched_by": []}
     reasons = build_reasons(
         p_bert=p_bert,
         validator_details=validator_output.details,
@@ -193,4 +210,5 @@ async def run_detection_pipeline(
         degraded_sources=record.degraded_sources,
         processing_ms=record.processing_ms,
         model_version=record.model_version,
+        report_stats=report_stats,
     )

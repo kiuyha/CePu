@@ -18,15 +18,13 @@ async def test_degraded_sources_appear_when_all_external_sources_fail(
     client, fake_redis, monkeypatch
 ):
     """
-    Matikan SEMUA sumber eksternal (AHU, LinkedIn, company_registry, DNS
-    MX) sekaligus, cache-nya juga kosong -> harus tetap 200 (bukan crash),
-    dengan degraded_sources terisi lengkap dan skor jatuh ke nilai netral.
+    Matikan sumber eksternal (CompanyHouse, DNS MX) sekaligus, cache-nya juga kosong ->
+    harus tetap 200 (bukan crash), dengan degraded_sources terisi lengkap dan skor jatuh ke nilai netral.
     """
     async def _always_fail(*args, **kwargs):
         raise RuntimeError("simulasi sumber eksternal mati total")
 
-    monkeypatch.setattr("api.services.validators.orchestrator.check_company_ahu", _always_fail)
-    monkeypatch.setattr("api.services.validators.orchestrator.check_company_linkedin", _always_fail)
+    monkeypatch.setattr("api.services.validators.orchestrator.check_company_legalitas", _always_fail)
     monkeypatch.setattr("api.services.validators.orchestrator.check_email_mx", _always_fail)
 
     async def _fake_predict(text: str) -> float:
@@ -45,8 +43,7 @@ async def test_degraded_sources_appear_when_all_external_sources_fail(
 
     assert response.status_code == 200
     body = response.json()
-    assert "ahu" in body["degraded_sources"]
-    assert "linkedin" in body["degraded_sources"]
+    assert "companyhouse" in body["degraded_sources"]
     assert "dns_mx" in body["degraded_sources"]
     # company_registry TIDAK dimock gagal, jadi tetap query normal (bukan degraded)
     assert "company_registry" not in body["degraded_sources"]

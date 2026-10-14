@@ -23,9 +23,10 @@ STANDARD_PHONE_PAT = r'(?:\+?\d{1,3}[\s-]?)?\(?\d{2,4}\)?[\s-]?\d{3,4}[\s-]?\d{3
 
 # Heuristic company regex matching notebook Cell 8:
 # r'\b(?:PT|CV|Perum|UD|Firma|Yayasan)\b\.?\s+[A-Z][a-zA-Z0-9\.\s]+'
-# We bound the title casing tokens so it doesn't greedily eat entire lowercased sentence clauses like "untuk posisi admin"
-COMPANY_HEURISTIC_BOUNDED = r'\b(?:PT|CV|Perum|UD|Firma|Yayasan)\b\.?\s+([A-Z][A-Za-z0-9&]*(?:\s+[A-Z][A-Za-z0-9&]*){0,4})'
-COMPANY_HEURISTIC = r'\b(?:PT|CV|Perum|UD|Firma|Yayasan)\b\.?\s+[A-Z][a-zA-Z0-9\.\s]+'
+# Use [^\S\r\n] (horizontal whitespace only) instead of \s to prevent matching across newlines.
+# Sebelumnya \s memakan newline sehingga "PT ABC\nJalan Xxx" ikut terekstrak sebagai nama perusahaan.
+COMPANY_HEURISTIC_BOUNDED = r'\b(?:PT|CV|Perum|UD|Firma|Yayasan)\b\.?[^\S\r\n]+([A-Z][A-Za-z0-9&]*(?:[^\S\r\n]+[A-Z][A-Za-z0-9&]*){0,5})'
+COMPANY_HEURISTIC = r'\b(?:PT|CV|Perum|UD|Firma|Yayasan)\b\.?[^\S\r\n]+[A-Z][a-zA-Z0-9\.][^\n]+'
 
 HOAX_NARRATIVE_PATTERNS = [
     r'cek fakta', r'periksa fakta', r'turnbackhoax', r'mafindo',
@@ -195,7 +196,17 @@ def extract_entities_and_features(
     ner_companies = [c.strip() for c in (companies or []) if c and c.strip()]
     companies_all = list(dict.fromkeys(heuristic_companies + ner_companies))
 
-    suspicious_keywords = ["transfer", "administrasi", "gaji tinggi tanpa syarat", "biaya pendaftaran", "hubungi wa"]
+    suspicious_keywords = [
+        # Permintaan uang / biaya
+        "transfer", "biaya pendaftaran", "biaya administrasi", "dp", "uang muka",
+        # Pola modus surat panggilan palsu
+        "reimbursement", "reimburse", "penggantian biaya", "ganti rugi biaya",
+        "mitra travel", "agen perjalanan", "pemesanan tiket", "pemesanan hotel",
+        "pesan tiket", "booking tiket", "booking hotel",
+        # Kata-kata umum penipuan lowongan
+        "administrasi", "gaji tinggi tanpa syarat", "hubungi wa", "hubungi whatsapp",
+        "tanpa pengalaman", "langsung diterima", "gaji besar",
+    ]
     lower_text = cleaned.lower()
     keyword_counts = {kw: lower_text.count(kw) for kw in suspicious_keywords}
     suspicious_keyword_total = sum(keyword_counts.values())

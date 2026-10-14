@@ -59,9 +59,16 @@ def build_reasons(
     elif company.get("binary") is False:
         reasons.append("Nama perusahaan pernah terverifikasi pada lowongan asli")
 
-    ahu = validator_details.get("ahu", {})
+    ahu = validator_details.get("companyhouse", {})
     if ahu.get("binary") is True:
-        reasons.append("Nama perusahaan tidak ditemukan di data AHU")
+        # binary=True artinya perusahaan terdaftar dalam blacklist scam
+        reasons.append("Nama perusahaan terdaftar sebagai perusahaan penipu/bermasalah di database legalitas")
+    elif ahu.get("binary") is False:
+        # binary=False artinya ditemukan sebagai perusahaan sah
+        reasons.append("Nama perusahaan terverifikasi legal di basis data AHU / companyhouse.id")
+    elif ahu.get("source") == "companyhouse.id":
+        # binary=None dari companyhouse.id artinya tidak ditemukan (bukan scam, tapi juga tidak terverifikasi)
+        reasons.append("Nama perusahaan tidak ditemukan di basis data AHU / companyhouse.id")
 
     phone = validator_details.get("phone_check") or validator_details.get("intel_blacklist", {})
     if phone.get("binary") is True:

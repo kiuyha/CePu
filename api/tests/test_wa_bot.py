@@ -41,9 +41,20 @@ def test_menu_3_asks_for_detect_input(client):
     assert "deteksi" in reply.lower() or "cek" in reply.lower()
 
 
-def test_footer_always_present(client):
+def test_no_prototype_footer_anymore(client):
     reply = _send(client, "user5", "halo")
-    assert "prototipe riset" in reply
+    assert "prototipe riset" not in reply
+
+
+def test_bare_job_command_asks_clarification(client):
+    reply = _send(client, "user-job-1", "/job")
+    assert "/job" in reply
+    assert "Mau cari kerja apa" in reply
+
+
+def test_detection_reply_tanpa_rekomendasi_otomatis(client):
+    reply = _send(client, "user-job-2", "PT Penipu Abadi minta transfer biaya admin 500rb ke rekening")
+    assert "Rekomendasi" not in reply
 
 
 def test_bantuan_available_anytime(client):
@@ -93,7 +104,7 @@ async def test_report_flow_creates_report_in_db(client):
 def test_report_flow_returns_to_idle_after_submitting(client):
     """Setelah lapor, state harus balik ke idle, bukan nyangkut di awaiting_report."""
     _send(client, "user10", "2")
-    _send(client, "user10", "laporan pertama")
+    _send(client, "user10", "PT Fiktif Jaya minta transfer biaya admin 500rb ke 081299988877")
     reply = _send(client, "user10", "halo")
     assert "pilih menu" in reply.lower()
 
@@ -136,3 +147,44 @@ def test_short_ambiguous_message_shows_menu_not_detection(client):
 def test_image_message_gets_honest_not_supported_reply(client):
     reply = _send(client, "user14", "(gambar)", msg_type="image")
     assert "belum didukung" in reply.lower()
+
+
+def test_menu_command_wins_over_report_flow(client):
+    """Reproduksi transkrip: 2 lalu 3 -> pindah ke Deteksi, bukan filing '3'."""
+    _send(client, "user-menu-wins", "2")
+    reply = _send(client, "user-menu-wins", "3")
+    assert "Laporan diterima" not in reply
+    assert "deteksi" in reply.lower() or "cek" in reply.lower()
+
+
+async def test_menu_switch_files_no_junk_report(client):
+    _send(client, "user-menu-wins-2", "2")
+    _send(client, "user-menu-wins-2", "3")
+
+    from sqlalchemy import select
+    from api.db.models import Report
+
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Report).where(Report.message_raw == "3")
+        )
+        assert result.scalar_one_or_none() is None
+
+
+def test_junk_not_filed_stays_in_report_flow(client):
+    _send(client, "user-junk", "2")
+    reply = _send(client, "user-junk", "ok")
+    assert "Laporan diterima" not in reply
+    assert "belum lengkap" in reply
+    # State bertahan: laporan beneran sesudahnya tetap difiling.
+    reply2 = _send(
+        client, "user-junk", "PT Penipu Abadi minta transfer 500rb ke 081234567890"
+    )
+    assert "Laporan diterima" in reply2
+
+
+def test_junk_in_detect_flow_gets_nudge(client):
+    _send(client, "user-djunk", "3")
+    reply = _send(client, "user-djunk", "ok")
+    assert "kurang lengkap" in reply
+    assert "Status:" not in reply
