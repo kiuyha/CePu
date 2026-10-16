@@ -59,8 +59,9 @@ npm start     # atau: bun start
 - **Fitur Chat Bot**:
   - `1` / `Edukasi`: Tips & artikel mengenali modus penipuan lowongan kerja.
   - `2` / `Lapor`: Mengirimkan laporan penipuan lowongan untuk disimpan ke database.
-  - `3` / `Deteksi`: Panduan input data loker lengkap (nomor, email, perusahaan, pesan, screenshot).
-  - Teks langsung: Mengirim langsung pesan loker untuk dicek skor risiko & rekomendasi alternatif pekerjaan aman.
+  - `3` / `Deteksi`: Panduan deteksi (wajib screenshot).
+  - Gambar/screenshot loker: Satu-satunya input deteksi — teks gambar dibaca otomatis (OCR) lalu dicek skor risikonya.
+  - Grup/channel/status/stiker/audio/video otomatis diabaikan (bot hanya melayani DM personal, anti-ban).
   - Ketik `bantuan` untuk panduan atau `reset` untuk memulai ulang sesi.
 
 ---

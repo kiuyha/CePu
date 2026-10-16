@@ -51,23 +51,31 @@ REPORT_GUIDE_TEXT = (
 )
 
 DETECTION_GUIDE_TEXT = (
-    "🔎 DETEKSI LOWONGAN PEKERJAAN\n\n"
+    "🔎 DETEKSI LOWONGAN PEKERJAAN (HANYA LEWAT GAMBAR 📸)\n\n"
     "Curiga dengan sebuah lowongan kerja?\n"
-    "Yuk kirimkan datanya untuk kami bantu cek dan analisis.\n\n"
-    "Silakan lengkapi informasi berikut:\n\n"
-    "📱 Nomor HP Perekrut\n"
-    "Contoh: 08xxxxxxxxxx\n\n"
-    "📧 Email Perekrut\n"
-    "Contoh: namaperekrut@gmail.com\n\n"
-    "🏢 Nama Perusahaan\n"
-    "Tuliskan nama perusahaan yang tertera di lowongan\n\n"
-    "📝 Teks / Pesan Lowongan\n"
-    "Salin isi pesan atau deskripsi lowongan yang kamu terima\n\n"
-    "📎 Screenshot Lowongan\n"
-    "Kirim file dalam format PNG, JPG, atau PDF (maksimal 5MB)\n\n"
-    "Setelah data lengkap, kirimkan untuk proses deteksi.\n"
-    "Kami akan membantu meninjau apakah lowongan tersebut aman atau berpotensi penipuan."
+    "Yuk kirimkan *screenshot/foto* lowongannya untuk kami bantu cek dan analisis.\n\n"
+    "📎 Screenshot Lowongan (WAJIB)\n"
+    "Kirim gambar dalam format PNG, JPG, atau WebP (maksimal 5MB).\n"
+    "Boleh tambah caption bila perlu — teks gambar akan kami baca otomatis.\n\n"
+    "⚠️ Teks ketikan saja tidak bisa dideteksi langsung supaya hasilnya akurat.\n"
+    "Kirim screenshot-nya ya!"
 )
+
+IMAGE_ONLY_DETECTION_NUDGE = (
+    "🔎 *Deteksi CePu hanya lewat gambar/screenshot* 📸\n\n"
+    "Mohon kirim *screenshot/foto lowongan kerja* (JPG/PNG/WebP, maks 5MB) "
+    "beserta caption bila perlu — nanti saya baca teksnya otomatis (OCR) dan analisis.\n\n"
+    "Teks ketikan tidak bisa dideteksi langsung supaya hasilnya akurat.\n"
+    "Ketik *bantuan* untuk panduan menu."
+)
+
+UNSUPPORTED_WA_TYPE_NUDGE = (
+    "📎 *Maaf, tipe pesan itu belum bisa diproses.*\n\n"
+    + IMAGE_ONLY_DETECTION_NUDGE
+)
+
+# Batas mentah gambar WA (5MB, sesuai panduan). Base64 ~4/3-nya.
+WA_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 HELP_TEXT = (
     "📖 Panduan CePu:\n"
@@ -191,7 +199,15 @@ async def handle_inbound_message(
     on_progress: Optional[any] = None,
 ) -> str:
     session_repo = WaSessionRepository(db)
+    # Normalisasi defensif: gateway bisa mengirim None / tipe aneh.
+    msg_type = (msg_type or "text").strip().lower()
+    msg_body = msg_body or ""
     stripped_lower = msg_body.strip().lower()
+
+    # Tipe yang tidak dikenal (stiker/audio/video/lokasi/dokumen non-gambar
+    # yang lolos dari gateway, dsb.) -> jangan pernah lempar ke pipeline.
+    if msg_type not in ("text", "image"):
+        return UNSUPPORTED_WA_TYPE_NUDGE
 
     if stripped_lower == "reset":
         await session_repo.delete(phone_hash)
@@ -256,10 +272,28 @@ async def handle_inbound_message(
         image_bytes = None
 
         if image_b64:
+            # Tolak payload raksasa sebelum decode (hemat RAM; base64 ~4/3 ukuran asli).
+            if len(image_b64) > WA_MAX_IMAGE_BYTES * 2:
+                return (
+                    "📎 *Gambarnya kebesaran (maks 5MB).* 🙏\n"
+                    "Coba kompres/screenshot ulang dengan resolusi lebih kecil, lalu kirim lagi ya."
+                )
             try:
-                image_bytes = base64.b64decode(image_b64)
+                image_bytes = base64.b64decode(image_b64, validate=True)
             except Exception:
-                pass
+                image_bytes = None
+
+        if image_bytes and len(image_bytes) > WA_MAX_IMAGE_BYTES:
+            return (
+                "📎 *Gambarnya kebesaran (maks 5MB).* 🙏\n"
+                "Coba kompres/screenshot ulang dengan resolusi lebih kecil, lalu kirim lagi ya."
+            )
+
+        if not image_bytes:
+            return (
+                "⚠️ *Gambarnya tidak bisa dibaca.* Coba kirim ulang screenshot-nya ya 📸 "
+                "(pastikan bukan foto sekali-lihat yang sudah dibuka)."
+            )
 
         if image_bytes:
             try:
@@ -279,7 +313,8 @@ async def handle_inbound_message(
         if not combined_text:
             return (
                 "📎 Gambar diterima, tapi tidak ada teks yang bisa terbaca. "
-                "Pastikan screenshot lowongan kerja terlihat jelas, atau kirim teks lowongannya langsung."
+                "Pastikan screenshot lowongan kerja terlihat jelas (tidak blur/terpotong), "
+                "lalu kirim ulang gambarnya ya 📸."
             )
 
         session_repo = WaSessionRepository(db)
@@ -325,34 +360,19 @@ async def handle_inbound_message(
         )
 
     if current_state == "awaiting_detect":
-        # Sama: jangan habiskan sekali inferensi BERT untuk "ok"/stiker.
-        if not _has_report_signal(msg_body):
-            return (
-                "Teksnya sepertinya kurang lengkap untuk dianalisis. 🔎\n"
-                "Kirim teks lowongannya ya — atau ketik 1, 2, 3 untuk pindah menu."
-            )
-        await session_repo.upsert(phone_hash, current_state="idle")
-        try:
-            outcome = await run_detection_pipeline(
-                channel="wa", text=msg_body, company=None, phone=None, email=None,
-                db=db, redis_client=redis_client, settings=settings,
-                on_progress=on_progress,
-            )
-        except ModelNotReadyError:
-            return "⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya."
-        return _format_detection_result(outcome)
+        # DETEKSI HANYA LEWAT GAMBAR: teks apa pun (panjang/pendek, bahkan
+        # yang mirip loker) TIDAK menjalankan pipeline — hemat inferensi
+        # BERT + hasil lebih akurat via OCR. Tetap di state yang sama supaya
+        # user tinggal kirim gambar berikutnya.
+        await session_repo.upsert(phone_hash, current_state="awaiting_detect")
+        return IMAGE_ONLY_DETECTION_NUDGE
 
     if _looks_like_direct_detection_input(msg_body):
-        await session_repo.upsert(phone_hash, current_state="idle")
-        try:
-            outcome = await run_detection_pipeline(
-                channel="wa", text=msg_body, company=None, phone=None, email=None,
-                db=db, redis_client=redis_client, settings=settings,
-                on_progress=on_progress,
-            )
-        except ModelNotReadyError:
-            return "⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya."
-        return _format_detection_result(outcome)
+        # User mengirim teks loker langsung tanpa menu -> arahkan ke gambar,
+        # jangan habiskan inferensi untuk teks ketikan. Set state agar
+        # gambar berikutnya langsung diproses sebagai deteksi.
+        await session_repo.upsert(phone_hash, current_state="awaiting_detect")
+        return IMAGE_ONLY_DETECTION_NUDGE
 
     await session_repo.upsert(phone_hash, current_state="idle")
     return MAIN_MENU_TEXT

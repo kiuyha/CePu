@@ -56,21 +56,45 @@ function makeSessionToken() {
 
 /** Verifikasi token dari cookie */
 function isValidToken(token) {
-  if (!token) return false;
-  const [payload, sig] = token.split(".");
-  if (!payload || !sig) return false;
-  const expected = crypto.createHmac("sha256", COOKIE_SECRET).update(payload).digest("hex");
-  if (!crypto.timingSafeEqual(Buffer.from(sig, "hex").slice(0, 32), Buffer.from(expected, "hex").slice(0, 32))) return false;
+  if (!token || typeof token !== "string") return false;
+  const dot = token.indexOf(".");
+  if (dot <= 0) return false;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  if (!payload || !sig || !/^[0-9a-fA-F]+$/.test(sig)) return false;
+  let sigBuf, expBuf;
+  try {
+    sigBuf = Buffer.from(sig, "hex");
+    const expected = crypto.createHmac("sha256", COOKIE_SECRET).update(payload).digest();
+    expBuf = expected;
+  } catch (_) {
+    return false;
+  }
+  if (sigBuf.length !== expBuf.length) return false;
+  if (!crypto.timingSafeEqual(sigBuf, expBuf)) return false;
+  const ts = parseInt(payload, 10);
+  if (!Number.isFinite(ts)) return false;
   // Cek umur token (max 24 jam)
-  return Date.now() - parseInt(payload, 10) < COOKIE_MAX_AGE * 1000;
+  return Date.now() - ts < COOKIE_MAX_AGE * 1000;
 }
 
-/** Parse cookie header → object */
+/** Parse cookie header → object (tahan terhadap nilai yang mengandung "=") */
 function parseCookies(req) {
   const raw = req.headers.cookie || "";
-  return Object.fromEntries(
-    raw.split(";").map(c => c.trim().split("=").map(decodeURIComponent))
-  );
+  const out = {};
+  if (!raw) return out;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    try {
+      const k = decodeURIComponent(part.slice(0, eq).trim());
+      const v = decodeURIComponent(part.slice(eq + 1).trim());
+      if (k) out[k] = v;
+    } catch (_) {
+      // abaikan cookie yang tidak bisa di-decode
+    }
+  }
+  return out;
 }
 
 /** Cek apakah request sudah auth */
@@ -253,10 +277,138 @@ qrServer.listen(QR_PORT, () => {
 });
 
 function hashPhoneNumber(senderJid) {
-  // Membersihkan ID WhatsApp (misal 6281234567890@s.whatsapp.net -> 6281234567890)
-  const cleanNumber = senderJid.split("@")[0].replace(/\D/g, "");
+  // Tangani berbagai bentuk JID: 628xx@s.whatsapp.net, xxx@lid,
+  // grup (xxx@g.us + participant), channel (@newsletter), dsb.
+  // Untuk grup: pakai participant (pengirim asli), bukan ID grup.
+  const raw = String(senderJid || "");
+  const cleanNumber = raw.split("@")[0].replace(/\D/g, "");
+  const basis = cleanNumber || raw;
   // Hash SHA-256 untuk menjaga privasi nomor pengguna di backend CePu
-  return crypto.createHash("sha256").update(cleanNumber).digest("hex");
+  return crypto.createHash("sha256").update(basis).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Kebijakan gateway: DETEKSI HANYA LEWAT GAMBAR.
+// - Teks (menu/bantuan/lapor/job) tetap diteruskan ke backend agar state
+//   machine (edukasi/lapor/menu/job) tetap jalan.
+// - Teks bebas TIDAK pernah memicu deteksi di backend (backend juga menolak
+//   pipeline teks dan membalas imbauan kirim screenshot).
+// - Hanya pesan gambar yang diteruskan sebagai job deteksi (type: "image").
+// - Tipe lain (stiker/audio/video/kontak/lokasi/poll/dokumen non-gambar/...)
+//   dibalas lokal dengan panduan kirim screenshot, TANPA memanggil backend
+//   (hemat inferensi BERT + anti-ban). Update protokol/reaksi/poll-vote
+//   diabaikan diam-diam agar bot tidak ngobrol sendiri.
+// ---------------------------------------------------------------------------
+const MAX_IMAGE_BYTES = parseInt(process.env.WA_MAX_IMAGE_BYTES || `${5 * 1024 * 1024}`, 10);
+const ALLOWED_IMAGE_MIMES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+]);
+// Dokumen yang masih masuk akal sebagai screenshot lowongan.
+const ALLOWED_DOC_MIMES = new Set([
+  ...ALLOWED_IMAGE_MIMES,
+  "application/pdf",
+]);
+
+const IMAGE_ONLY_GUIDE_TEXT = (
+  "🔎 *Deteksi CePu hanya lewat gambar/screenshot* 📸\n\n" +
+  "Mohon kirim *screenshot/foto lowongan kerja* (JPG/PNG/WebP, maks 5MB) " +
+  "beserta caption bila perlu — nanti saya baca teksnya otomatis (OCR) dan analisis.\n\n" +
+  "Teks ketikan tidak bisa dideteksi langsung supaya hasilnya akurat.\n" +
+  "Ketik *bantuan* untuk panduan menu."
+);
+
+const UNSUPPORTED_KIND_TEXT = (
+  "📎 *Maaf, tipe pesan itu belum bisa diproses.*\n\n" +
+  IMAGE_ONLY_GUIDE_TEXT
+);
+
+const TOO_LARGE_IMAGE_TEXT = (
+  "📎 *Gambarnya kebesaran (maks 5MB).* 🙏\n" +
+  "Coba kompres/screenshot ulang dengan resolusi lebih kecil, lalu kirim lagi ya."
+);
+
+const BUSY_TEXT = (
+  "⏳ *Masih menganalisis gambar sebelumnya...* tunggu sebentar ya, " +
+  "saya balas begitu selesai. Kirim ulang gambarnya jika belum ada balasan 1 menit lagi."
+);
+
+// Deduplikasi redelivery Baileys: id pesan -> timestamp. TTL 5 menit.
+const seenMessageIds = new Map();
+const SEEN_TTL_MS = 5 * 60 * 1000;
+function isDuplicateMessage(keyId) {
+  if (!keyId) return false;
+  const now = Date.now();
+  if (seenMessageIds.has(keyId)) return true;
+  seenMessageIds.set(keyId, now);
+  if (seenMessageIds.size > 2000) {
+    for (const [k, ts] of seenMessageIds) {
+      if (now - ts > SEEN_TTL_MS) seenMessageIds.delete(k);
+      if (seenMessageIds.size <= 1500) break;
+    }
+  }
+  return false;
+}
+
+// Cegah dobel inferensi paralel dari pengirim yang sama (spam/ban + hemat GPU).
+const inflightSenders = new Set();
+
+// Cooldown balasan "kirim gambar dong" supaya stiker-spam tidak bikin bot
+// kena flag spam. Default 45 detik per pengirim.
+const lastNudgeAt = new Map();
+const NUDGE_COOLDOWN_MS = parseInt(process.env.WA_NUDGE_COOLDOWN_MS || "45000", 10);
+function shouldSendNudge(senderJid) {
+  const now = Date.now();
+  const last = lastNudgeAt.get(senderJid) || 0;
+  if (now - last < NUDGE_COOLDOWN_MS) return false;
+  lastNudgeAt.set(senderJid, now);
+  return true;
+}
+
+/** True jika JID ini BUKAN DM personal (grup/channel/broadcast/status). */
+function isNonDirectChat(remoteJid) {
+  if (!remoteJid) return true;
+  if (remoteJid === "status@broadcast") return true;
+  if (remoteJid.endsWith("@g.us")) return true; // grup
+  if (remoteJid.endsWith("@broadcast")) return true; // broadcast/status
+  if (remoteJid.endsWith("@newsletter")) return true; // channel/follow
+  return false;
+}
+
+/**
+ * Lepas pembungkus Baileys: ephemeral / view-once / lanjutan view-once.
+ * Mengembalikan objek message yang sudah "telanjang".
+ */
+function unwrapMessageContent(content) {
+  let cur = content;
+  for (let i = 0; i < 5 && cur; i++) {
+    if (cur.ephemeralMessage?.message) {
+      cur = cur.ephemeralMessage.message;
+    } else if (cur.viewOnceMessage?.message) {
+      cur = cur.viewOnceMessage.message;
+    } else if (cur.viewOnceMessageV2?.message) {
+      cur = cur.viewOnceMessageV2.message;
+    } else if (cur.viewOnceMessageV2Extension?.message) {
+      cur = cur.viewOnceMessageV2Extension.message;
+    } else {
+      break;
+    }
+  }
+  return cur || {};
+}
+
+/** Ambil teks dari berbagai kemungkinan payload (caption ikut). */
+function extractTextBody(content) {
+  return (
+    content?.conversation ||
+    content?.extendedTextMessage?.text ||
+    content?.imageMessage?.caption ||
+    content?.documentMessage?.caption ||
+    content?.videoMessage?.caption ||
+    ""
+  );
 }
 
 async function forwardMessageToBackend(phoneHash, msgType, textContent, onProgress, imageB64 = null, mimeType = null) {
@@ -370,7 +522,13 @@ async function startWhatsAppBot() {
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      // loggedOut / badSession = sesi mati, reconnect sia-sia (butuh scan ulang).
+      // Selain itu (closed/lost/timedOut/replaced/restartRequired/...) = reconnect.
+      const fatalCodes = new Set([
+        DisconnectReason.loggedOut,
+        DisconnectReason.badSession,
+      ]);
+      const shouldReconnect = !fatalCodes.has(statusCode);
 
       logger.warn(
         { statusCode, shouldReconnect, reason: lastDisconnect?.error },
@@ -380,6 +538,8 @@ async function startWhatsAppBot() {
       if (shouldReconnect) {
         console.log("🔄 Menghubungkan ulang ke WhatsApp dalam 3 detik...");
         setTimeout(() => startWhatsAppBot(), 3000);
+      } else if (statusCode === DisconnectReason.badSession) {
+        console.log("❌ Sesi korup (bad session). Hapus direktori session dan restart untuk scan QR baru.");
       } else {
         console.log("❌ Sesi telah keluar (logged out). Hapus direktori session dan restart untuk scan QR baru.");
       }
@@ -392,55 +552,164 @@ async function startWhatsAppBot() {
     }
   });
 
-  // Tangani pesan masuk
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
+  // Kirim teks dengan aman: jangan pernah lempar exception ke loop utama.
+  async function safeReplyText(toJid, text, quotedMsg) {
+    try {
+      await sock.sendMessage(toJid, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+      return true;
+    } catch (err) {
+      logger.warn({ err, toJid }, "Gagal mengirim balasan teks");
+      return false;
+    }
+  }
 
-    for (const msg of messages) {
-      // Abaikan pesan yang dikirim oleh bot itu sendiri atau pesan status/broadcast
-      if (msg.key.fromMe) continue;
-      if (msg.key.remoteJid.endsWith("@broadcast") || msg.key.remoteJid.includes("status")) {
-        continue;
+  // Satu pesan diproses di sini. Semua edge-case "aneh" WhatsApp ditangani
+  // di satu tempat supaya loop utama tidak pernah crash.
+  async function handleOneIncomingMessage(msg) {
+    // 1) Abaikan pesan milik sendiri.
+    if (msg.key?.fromMe) return;
+
+    // Baileys baru kadang menaruh DM di remoteJidAlt (pemetaan LID<->PN).
+    const remoteJid = msg.key?.remoteJid || msg.key?.remoteJidAlt;
+    if (!remoteJid) return;
+
+    // 2) Abaikan grup / channel / broadcast / status.
+    //    Bot ini reply-only di DM personal; membalas di grup = spam + risiko banned.
+    if (isNonDirectChat(remoteJid)) return;
+
+    // 3) Deduplikasi redelivery (Baileys bisa mengirim pesan yang sama 2x).
+    if (isDuplicateMessage(msg.key?.id)) return;
+
+    // 4) Abaikan update non-chat: read receipt/history-sync/dsb tanpa payload.
+    if (!msg.message) return;
+
+    const content = unwrapMessageContent(msg.message);
+
+    // 5) Abaikan diam-diam: pesan protokol (revoke/delete), reaksi, vote poll,
+    //    dan event panggilan. Membalas ini hanya bikin bot ngobrol sendiri.
+    if (
+      content.protocolMessage ||
+      content.reactionMessage ||
+      content.pollUpdateMessage ||
+      content.keepInChatMessage
+    ) {
+      return;
+    }
+
+    const senderJid = remoteJid;
+    const messageBody = extractTextBody(content) || "";
+
+    const hasImage = Boolean(content.imageMessage);
+    const hasDocument = Boolean(content.documentMessage);
+    const hasVideo = Boolean(content.videoMessage);
+    const hasAudio = Boolean(content.audioMessage || content.pttMessage);
+    const hasSticker = Boolean(content.stickerMessage);
+    const hasContact = Boolean(content.contactMessage || content.contactsArrayMessage);
+    const hasLocation = Boolean(content.locationMessage || content.liveLocationMessage);
+    const hasPollCreate = Boolean(content.pollCreationMessage);
+    const hasCall = Boolean(content.callLogMessage || content.callLogRecordMessage);
+
+    // 6) Tipe yang tidak didukung untuk deteksi -> balas panduan LOKAL
+    //    (tanpa memanggil backend) + cooldown anti-spam.
+    //    Catatan: teks & gambar diteruskan ke backend; sisanya ditolak di sini.
+    const unsupportedKind =
+      hasSticker || hasAudio || hasVideo || hasContact || hasLocation || hasPollCreate || hasCall ||
+      (hasDocument && !ALLOWED_DOC_MIMES.has((content.documentMessage?.mimetype || "").split(";")[0].trim().toLowerCase()));
+
+    if (unsupportedKind) {
+      let kind = "lainnya";
+      if (hasSticker) kind = "stiker";
+      else if (hasAudio) kind = "audio/vn";
+      else if (hasVideo) kind = "video";
+      else if (hasContact) kind = "kontak";
+      else if (hasLocation) kind = "lokasi";
+      else if (hasPollCreate) kind = "polling";
+      else if (hasCall) kind = "panggilan";
+      else if (hasDocument) kind = `dokumen (${content.documentMessage?.mimetype || "?"})`;
+      console.log(`⏭️ Pesan ${kind} dari ${senderJid} ditolak lokal (bukan gambar).`);
+      if (shouldSendNudge(senderJid)) {
+        await safeReplyText(senderJid, UNSUPPORTED_KIND_TEXT, msg);
       }
+      return;
+    }
 
-      const senderJid = msg.key.remoteJid;
-      // Ambil teks dari berbagai kemungkinan payload baileys
-      const messageBody =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption ||
-        "";
+    const isDocImage = hasDocument && ALLOWED_DOC_MIMES.has(
+      (content.documentMessage?.mimetype || "").split(";")[0].trim().toLowerCase()
+    );
+    const isImage = hasImage || isDocImage;
 
-      const isImage = Boolean(msg.message?.imageMessage);
+    // 7) Pesan kosong tanpa teks & tanpa gambar (mis. poll-update lolos,
+    //    messageContextInfo saja, dsb.) -> abaikan diam-diam.
+    if (!messageBody && !isImage) {
+      return;
+    }
 
-      // Jika tidak ada teks maupun gambar (misal stiker, kontak, reaksi), abaikan
-      if (!messageBody && !isImage) {
-        continue;
-      }
-
+    // 8) Cegah inferensi ganda paralel dari pengirim yang sama.
+    if (inflightSenders.has(senderJid)) {
+      await safeReplyText(senderJid, BUSY_TEXT, msg);
+      return;
+    }
+    inflightSenders.add(senderJid);
+    try {
       const msgType = isImage ? "image" : "text";
-      const phoneHash = hashPhoneNumber(senderJid);
+      // Untuk grup (sudah diabaikan di atas) participant dipakai; di DM pakai remoteJid.
+      const phoneHash = hashPhoneNumber(msg.key?.participant || senderJid);
 
-      // Download image jika ada
+      // 9) Download gambar jika ada + validasi ukuran & mime.
+      //    DETEKSI HANYA LEWAT GAMBAR: caption boleh kosong (OCR yang bicara).
       let imageB64 = null;
       let mimeType = null;
       if (isImage) {
-        try {
-          const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger });
-          imageB64 = buffer.toString("base64");
-          mimeType = msg.message.imageMessage.mimetype || "image/jpeg";
-        } catch (e) {
-          logger.warn({ err: e }, "Gagal download gambar WhatsApp, lanjut tanpa gambar");
+        const mediaNode = content.imageMessage || content.documentMessage;
+        const declaredMime = (mediaNode?.mimetype || "image/jpeg").split(";")[0].trim().toLowerCase();
+        if (!ALLOWED_DOC_MIMES.has(declaredMime)) {
+          if (shouldSendNudge(senderJid)) {
+            await safeReplyText(senderJid, UNSUPPORTED_KIND_TEXT, msg);
+          }
+          return;
         }
+        // Pra-cek fileLength dari metadata WA (kalau ada) supaya file 50MB
+        // tidak di-download dulu baru ditolak.
+        const declaredLen = parseInt(mediaNode?.fileLength || "0", 10);
+        if (Number.isFinite(declaredLen) && declaredLen > MAX_IMAGE_BYTES) {
+          await safeReplyText(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
+          return;
+        }
+        let buffer;
+        try {
+          buffer = await downloadMediaMessage(msg, "buffer", {}, { logger });
+        } catch (e) {
+          logger.warn({ err: e }, "Gagal download media WhatsApp");
+          await safeReplyText(
+            senderJid,
+            "⚠️ *Gagal mengunduh gambarnya.* Coba kirim ulang screenshot-nya ya 📸 (pastikan bukan sekali-lihat yang sudah dibuka).",
+            msg
+          );
+          return;
+        }
+        if (!buffer || buffer.length === 0) {
+          await safeReplyText(
+            senderJid,
+            "⚠️ *Gambarnya kosong/tidak terbaca.* Coba kirim ulang screenshot-nya ya 📸.",
+            msg
+          );
+          return;
+        }
+        if (buffer.length > MAX_IMAGE_BYTES) {
+          await safeReplyText(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
+          return;
+        }
+        imageB64 = buffer.toString("base64");
+        mimeType = declaredMime;
       }
 
-      console.log(`📥 Pesan diterima dari ${senderJid} (type: ${msgType}): "${messageBody}"`);
+      console.log(`📥 Pesan diterima dari ${senderJid} (type: ${msgType}): "${messageBody.slice(0, 120)}"`);
 
       // Tampilkan indikator mengetik (composing) di WhatsApp pengirim
       try {
         await sock.sendPresenceUpdate("composing", senderJid);
       } catch (e) {
-        // abaikan jika presence gagal
+        // abaikan jika presence gagal (mis. JID aneh / grup)
       }
 
       let progressMsgKey = null;
@@ -471,7 +740,10 @@ async function startWhatsAppBot() {
         }
       };
 
-      // Teruskan pesan ke API CePu Backend dengan callback progres
+      // Teruskan pesan ke API CePu Backend dengan callback progres.
+      // - type "image" -> backend menjalankan OCR + pipeline deteksi.
+      // - type "text"  -> backend HANYA melayani menu/edukasi/lapor/job;
+      //   teks bebas TIDAK memicu deteksi (backend membalas panduan gambar).
       const botReply = await forwardMessageToBackend(phoneHash, msgType, messageBody, onProgress, imageB64, mimeType);
 
       // Kirim balasan akhir ke pengguna (atau edit status message terakhir menjadi hasil akhir)
@@ -488,6 +760,22 @@ async function startWhatsAppBot() {
         console.log(`📤 Balasan terkirim ke ${senderJid}`);
       } catch (err) {
         logger.error({ err, senderJid }, "Gagal mengirim balasan WhatsApp");
+      }
+    } finally {
+      inflightSenders.delete(senderJid);
+    }
+  }
+
+  // Tangani pesan masuk
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+
+    for (const msg of messages) {
+      try {
+        await handleOneIncomingMessage(msg);
+      } catch (err) {
+        // Satu pesan busuk tidak boleh membunuh loop / memutuskan koneksi.
+        logger.error({ err, msgId: msg?.key?.id }, "Gagal memproses pesan masuk, dilewati");
       }
     }
   });
