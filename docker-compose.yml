@@ -2,7 +2,7 @@ services:
   db:
     image: postgres:16-alpine
     container_name: cepu-db
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-cepu_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cepu_password}
@@ -20,7 +20,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: cepu-redis
-    restart: unless-stopped
+    restart: always
     ports:
       - "6379:6379"
     volumes:
@@ -36,7 +36,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: cepu-backend
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     environment:
@@ -59,30 +59,51 @@ services:
       context: .
       dockerfile: Dockerfile.web
     container_name: cepu-web
-    restart: unless-stopped
+    restart: always
     ports:
       - "3000:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   gateway-wa:
     build:
       context: .
       dockerfile: Dockerfile.gateway-wa
     container_name: cepu-gateway-wa
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     environment:
       - VITE_API_URL=http://backend:5687
       - BACKEND_URL=http://backend:5687
       - WA_SESSION_PATH=/app/session
+      - QR_PORT=3001
+      - QR_PASSWORD=${QR_PASSWORD:-cepu-qr-secret}
+    ports:
+      - "3001:3001"
     volumes:
       - wa_session:/app/session
     stdin_open: true
     tty: true
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: cepu-autoheal
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=15
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   postgres_data:

@@ -184,6 +184,7 @@ async def handle_inbound_message(
     phone_hash: str,
     msg_type: str,
     msg_body: str,
+    image_b64: Optional[str] = None,
     db: AsyncSession,
     redis_client: redis.Redis,
     settings: Settings,
@@ -247,10 +248,58 @@ async def handle_inbound_message(
         )
 
     if msg_type == "image":
-        return (
-            "Maaf, deteksi lewat gambar via WhatsApp belum didukung saat ini. "
-            "Silakan ketik ulang teks lowongannya langsung."
-        )
+        import asyncio
+        import base64
+        from .ocr import extract_text_from_image_bytes
+
+        ocr_text = None
+        image_bytes = None
+
+        if image_b64:
+            try:
+                image_bytes = base64.b64decode(image_b64)
+            except Exception:
+                pass
+
+        if image_bytes:
+            try:
+                if on_progress:
+                    await on_progress("ocr", "Membaca teks dari gambar...", 15)
+                ocr_text, _ = await asyncio.to_thread(
+                    extract_text_from_image_bytes, image_bytes
+                )
+            except Exception:
+                ocr_text = None
+
+        # Gabungkan caption + teks OCR sebagai konteks deteksi
+        combined_text = " ".join(
+            filter(None, [msg_body.strip(), ocr_text])
+        ).strip()
+
+        if not combined_text:
+            return (
+                "📎 Gambar diterima, tapi tidak ada teks yang bisa terbaca. "
+                "Pastikan screenshot lowongan kerja terlihat jelas, atau kirim teks lowongannya langsung."
+            )
+
+        session_repo = WaSessionRepository(db)
+        await session_repo.upsert(phone_hash, current_state="idle")
+        try:
+            outcome = await run_detection_pipeline(
+                channel="wa",
+                text=combined_text,
+                ocr_text=None,  # sudah digabung di combined_text
+                company=None,
+                phone=None,
+                email=None,
+                db=db,
+                redis_client=redis_client,
+                settings=settings,
+                on_progress=on_progress,
+            )
+        except ModelNotReadyError:
+            return "⏳ Sistem deteksi sedang mempersiapkan model, coba lagi sebentar ya."
+        return _format_detection_result(outcome)
 
     session = await session_repo.get(phone_hash)
     current_state = session.current_state if session else "idle"

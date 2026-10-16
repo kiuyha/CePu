@@ -18,6 +18,8 @@ router = APIRouter(prefix="/internal/wa", tags=["internal-wa"])
 class WaMessage(BaseModel):
     type: str  # "text" | "image"
     body: str
+    image_b64: Optional[str] = None
+    mime_type: Optional[str] = None
 
 
 class WaInboundPayload(BaseModel):
@@ -46,6 +48,7 @@ async def wa_inbound(
             phone_hash=payload.phone_hash,
             msg_type=payload.msg.type,
             msg_body=payload.msg.body,
+            image_b64=payload.msg.image_b64,
             db=db,
             redis_client=redis_client,
             settings=settings,
@@ -80,6 +83,7 @@ async def wa_inbound(
                     phone_hash=payload.phone_hash,
                     msg_type=payload.msg.type,
                     msg_body=payload.msg.body,
+                    image_b64=payload.msg.image_b64,
                     db=task_db,
                     redis_client=redis_client,
                     settings=settings,
