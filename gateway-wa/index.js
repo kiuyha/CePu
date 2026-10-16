@@ -565,12 +565,25 @@ async function startWhatsAppBot() {
 
   // WAJIB mengimbangi setiap "composing": tanpa "paused", aplikasi WA
   // pengirim macet menampilkan "mengetik..." padahal hasil sudah terkirim.
-  async function markIdle(toJid) {
-    try {
-      await sock.sendPresenceUpdate("paused", toJid);
-    } catch (e) {
-      // abaikan
+  // Kirim "paused" ke remoteJid maupun remoteJidAlt jika ada, serta beri sedikit retry
+  // agar WhatsApp client pengirim benar-benar mereset typing status.
+  async function markIdle(toJid, altJid = null) {
+    const jids = [toJid, altJid].filter(Boolean);
+    for (const jid of jids) {
+      try {
+        await sock.sendPresenceUpdate("paused", jid);
+      } catch (e) {
+        // abaikan
+      }
     }
+    // Kirim ulang sekali lagi setelah jeda singkat (250ms) sebagai pengaman jika packet presence pertama tertumpuk
+    setTimeout(async () => {
+      for (const jid of jids) {
+        try {
+          await sock.sendPresenceUpdate("paused", jid);
+        } catch (_) {}
+      }
+    }, 250);
   }
 
   // Centang biru best-effort: tanda pesan sudah dibaca bot.
@@ -583,9 +596,9 @@ async function startWhatsAppBot() {
   }
 
   // Balasan lokal (tanpa backend) + tutup indikator mengetik.
-  async function replyAndIdle(toJid, text, quotedMsg) {
+  async function replyAndIdle(toJid, text, quotedMsg, altJid = null) {
     const ok = await safeReplyText(toJid, text, quotedMsg);
-    await markIdle(toJid);
+    await markIdle(toJid, altJid || quotedMsg?.key?.remoteJidAlt);
     return ok;
   }
 
@@ -795,7 +808,7 @@ async function startWhatsAppBot() {
       // Tutup indikator "mengetik..." di HP pengirim — wajib di semua
       // jalur (sukses maupun gagal), kalau tidak chat macet menampilkan
       // status menulis padahal tidak ada pesan susulan.
-      await markIdle(senderJid);
+      await markIdle(senderJid, msg.key?.remoteJidAlt);
     }
   }
 
@@ -812,7 +825,8 @@ async function startWhatsAppBot() {
         // Best-effort: jangan biarkan indikator mengetik nyangkut.
         try {
           const jid = msg?.key?.remoteJid || msg?.key?.remoteJidAlt;
-          if (jid && !isNonDirectChat(jid)) await markIdle(jid);
+          const altJid = msg?.key?.remoteJidAlt;
+          if (jid && !isNonDirectChat(jid)) await markIdle(jid, altJid);
         } catch (_) {}
       }
     }
