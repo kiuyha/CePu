@@ -563,6 +563,32 @@ async function startWhatsAppBot() {
     }
   }
 
+  // WAJIB mengimbangi setiap "composing": tanpa "paused", aplikasi WA
+  // pengirim macet menampilkan "mengetik..." padahal hasil sudah terkirim.
+  async function markIdle(toJid) {
+    try {
+      await sock.sendPresenceUpdate("paused", toJid);
+    } catch (e) {
+      // abaikan
+    }
+  }
+
+  // Centang biru best-effort: tanda pesan sudah dibaca bot.
+  async function markRead(incomingMsg) {
+    try {
+      await sock.readMessages([incomingMsg.key]);
+    } catch (e) {
+      // abaikan
+    }
+  }
+
+  // Balasan lokal (tanpa backend) + tutup indikator mengetik.
+  async function replyAndIdle(toJid, text, quotedMsg) {
+    const ok = await safeReplyText(toJid, text, quotedMsg);
+    await markIdle(toJid);
+    return ok;
+  }
+
   // Satu pesan diproses di sini. Semua edge-case "aneh" WhatsApp ditangani
   // di satu tempat supaya loop utama tidak pernah crash.
   async function handleOneIncomingMessage(msg) {
@@ -628,7 +654,7 @@ async function startWhatsAppBot() {
       else if (hasDocument) kind = `dokumen (${content.documentMessage?.mimetype || "?"})`;
       console.log(`⏭️ Pesan ${kind} dari ${senderJid} ditolak lokal (bukan gambar).`);
       if (shouldSendNudge(senderJid)) {
-        await safeReplyText(senderJid, UNSUPPORTED_KIND_TEXT, msg);
+        await replyAndIdle(senderJid, UNSUPPORTED_KIND_TEXT, msg);
       }
       return;
     }
@@ -644,9 +670,12 @@ async function startWhatsAppBot() {
       return;
     }
 
+    // Centang biru: pesan diterima dan sedang diproses.
+    await markRead(msg);
+
     // 8) Cegah inferensi ganda paralel dari pengirim yang sama.
     if (inflightSenders.has(senderJid)) {
-      await safeReplyText(senderJid, BUSY_TEXT, msg);
+      await replyAndIdle(senderJid, BUSY_TEXT, msg);
       return;
     }
     inflightSenders.add(senderJid);
@@ -664,7 +693,7 @@ async function startWhatsAppBot() {
         const declaredMime = (mediaNode?.mimetype || "image/jpeg").split(";")[0].trim().toLowerCase();
         if (!ALLOWED_DOC_MIMES.has(declaredMime)) {
           if (shouldSendNudge(senderJid)) {
-            await safeReplyText(senderJid, UNSUPPORTED_KIND_TEXT, msg);
+            await replyAndIdle(senderJid, UNSUPPORTED_KIND_TEXT, msg);
           }
           return;
         }
@@ -672,7 +701,7 @@ async function startWhatsAppBot() {
         // tidak di-download dulu baru ditolak.
         const declaredLen = parseInt(mediaNode?.fileLength || "0", 10);
         if (Number.isFinite(declaredLen) && declaredLen > MAX_IMAGE_BYTES) {
-          await safeReplyText(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
+          await replyAndIdle(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
           return;
         }
         let buffer;
@@ -680,7 +709,7 @@ async function startWhatsAppBot() {
           buffer = await downloadMediaMessage(msg, "buffer", {}, { logger });
         } catch (e) {
           logger.warn({ err: e }, "Gagal download media WhatsApp");
-          await safeReplyText(
+          await replyAndIdle(
             senderJid,
             "⚠️ *Gagal mengunduh gambarnya.* Coba kirim ulang screenshot-nya ya 📸 (pastikan bukan sekali-lihat yang sudah dibuka).",
             msg
@@ -688,7 +717,7 @@ async function startWhatsAppBot() {
           return;
         }
         if (!buffer || buffer.length === 0) {
-          await safeReplyText(
+          await replyAndIdle(
             senderJid,
             "⚠️ *Gambarnya kosong/tidak terbaca.* Coba kirim ulang screenshot-nya ya 📸.",
             msg
@@ -696,7 +725,7 @@ async function startWhatsAppBot() {
           return;
         }
         if (buffer.length > MAX_IMAGE_BYTES) {
-          await safeReplyText(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
+          await replyAndIdle(senderJid, TOO_LARGE_IMAGE_TEXT, msg);
           return;
         }
         imageB64 = buffer.toString("base64");
@@ -763,6 +792,10 @@ async function startWhatsAppBot() {
       }
     } finally {
       inflightSenders.delete(senderJid);
+      // Tutup indikator "mengetik..." di HP pengirim — wajib di semua
+      // jalur (sukses maupun gagal), kalau tidak chat macet menampilkan
+      // status menulis padahal tidak ada pesan susulan.
+      await markIdle(senderJid);
     }
   }
 
@@ -776,6 +809,11 @@ async function startWhatsAppBot() {
       } catch (err) {
         // Satu pesan busuk tidak boleh membunuh loop / memutuskan koneksi.
         logger.error({ err, msgId: msg?.key?.id }, "Gagal memproses pesan masuk, dilewati");
+        // Best-effort: jangan biarkan indikator mengetik nyangkut.
+        try {
+          const jid = msg?.key?.remoteJid || msg?.key?.remoteJidAlt;
+          if (jid && !isNonDirectChat(jid)) await markIdle(jid);
+        } catch (_) {}
       }
     }
   });

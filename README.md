@@ -64,6 +64,22 @@ npm start     # atau: bun start
   - Grup/channel/status/stiker/audio/video otomatis diabaikan (bot hanya melayani DM personal, anti-ban).
   - Ketik `bantuan` untuk panduan atau `reset` untuk memulai ulang sesi.
 
+- **Memperbarui cookie sesi scraper (anti-flag)**:
+  Validator `kredibel.com` dan `companyhouse.id` butuh cookie sesi + pass challenge Cloudflare (`cf_clearance`) yang kedaluwarsa dalam hitungan jam dan terikat IP egress. Kalau basi, validator otomatis degradasi (skor netral + flag `degraded_sources`), bukan error — tapi akurasinya turun. Perbarui dengan harvester Playwright:
+  ```bash
+  # Sekali saja: install browser otomatisasi
+  pip install playwright && playwright install chromium
+
+  # Panen + tulis langsung ke .env (backup lama ke .env.bak)
+  python scripts/refresh_browser_sessions.py --site all --headed --profile-dir ./sessions/chrome --write-env
+
+  # Wajib restart backend agar Settings baru terbaca
+  docker compose restart backend   # atau restart uvicorn bila jalan lokal
+  ```
+  - **Aturan egress**: panen dari mesin yang sama dengan server (atau via proxy yang sama). `cf_clearance` yang dipanen di laptop A tidak berlaku di server laptop B bila beda IP publik — cek dengan `curl -s ifconfig.me` di kedua mesin. Kalau server di laptop lain, jalankan harvester di laptop itu.
+  - **Kuota Kredibel**: pencarian anonim dibatasi per IP. Untuk demo PKM + cache 14 hari biasanya cukup; bila butuh lebih, login ke akun Kredibel di jendela `--headed` saat panen (risiko flag ditanggung akun itu).
+  - **Rutinitas**: refresh tanpa `--headed` untuk pemakaian harian (profil persisten dipakai ulang); tambah `--headed` hanya saat log scraper menunjukkan `challenge` / redirect login. `--site kredibel` / `--site companyhouse` untuk refresh satuan.
+
 ---
 
 ## 🐳 Deployment Menggunakan Docker Container

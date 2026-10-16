@@ -2,7 +2,9 @@
 Scraper modular untuk companyhouse.id dengan session-based HTTP workflow.
 """
 import logging
+import random
 import re
+import time
 from typing import Any, Optional
 from bs4 import BeautifulSoup
 
@@ -30,6 +32,9 @@ def generate_company_slug(company_name: str) -> str:
 class CompanyHouseScraper:
     # Simpan cookie aktif di level class agar request berikutnya otomatis memakai cookie ter-update
     _active_cookies: dict[str, str] = {}
+
+    # Jeda baca-klik ala manusia antara warm-up homepage dan request detail.
+    WARMUP_CLICK_DELAY = (0.8, 2.0)
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
@@ -91,6 +96,35 @@ class CompanyHouseScraper:
                 self.session.cookies.set(name, value)
             except Exception:
                 pass
+
+    def _is_jar_cold(self) -> bool:
+        """True jika cookie jar kosong (belum ada sesi sama sekali)."""
+        from ..anti_ban import iter_cookie_pairs
+
+        return not iter_cookie_pairs(self.session.cookies)
+
+    def _warm_up_homepage(self) -> None:
+        """Best-effort: kunjungi homepage dulu sebelum deep-link.
+
+        Memberi session riwayat navigasi + cookie segar layaknya kunjungan
+        browser (homepage -> klik -> halaman detail). Hanya jalan saat jar
+        benar-benar dingin (tanpa cookie .env maupun hasil request lama);
+        kegagalan diabaikan dan request detail tetap jalan.
+        """
+        if not self._is_jar_cold():
+            return
+        base = self.settings.companyhouse_base_url.rstrip("/")
+        try:
+            resp = self.session.get(
+                base + "/",
+                timeout=self.settings.companyhouse_timeout_seconds,
+                allow_redirects=True,
+            )
+            self._update_cookies_from_response(resp)
+            # Jeda baca-klik ala manusia sebelum lanjut ke halaman detail.
+            time.sleep(random.uniform(*self.WARMUP_CLICK_DELAY))
+        except Exception as exc:
+            logger.debug("Warm-up companyhouse.id gagal (best-effort): %s", exc)
 
     def parse_company_page(self, html_content: str, default_name: str = "") -> dict[str, Any]:
         """
@@ -220,7 +254,12 @@ class CompanyHouseScraper:
             self.settings.scrape_jitter_seconds,
         )
 
-        url = f"{self.settings.companyhouse_base_url.rstrip('/')}/{slug}"
+        # Kunjungan berurutan ala browser: homepage dulu (kalau sesi dingin),
+        # lalu detail dengan Referer — bukan deep-link tiba-tiba.
+        self._warm_up_homepage()
+
+        base = self.settings.companyhouse_base_url.rstrip("/")
+        url = f"{base}/{slug}"
         logger.info("Fetching companyhouse.id profile: %s", url)
 
         try:
@@ -228,6 +267,7 @@ class CompanyHouseScraper:
                 url,
                 timeout=self.settings.companyhouse_timeout_seconds,
                 allow_redirects=True,
+                headers={"Referer": base + "/"},
             )
             self._update_cookies_from_response(resp)
             if resp.status_code == 200:

@@ -9,3 +9,5 @@ example
 gateway-wa/session/
 gateway-wa/node_modules/
 web/node_modules/
+sessions/
+.env.bak

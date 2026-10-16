@@ -160,6 +160,10 @@ class KredibelScraper:
             self.settings.scrape_jitter_seconds,
         )
 
+        # Kunjungan berurutan ala browser: homepage dulu (kalau sesi dingin),
+        # lalu halaman nomor dengan Referer — bukan deep-link tiba-tiba.
+        self._warm_up_homepage()
+
         url = f"{self.settings.kredibel_base_url.rstrip('/')}/phone/id/{clean_num}"
         logger.info("Fetching kredibel.com profile: %s", url)
 
@@ -222,6 +226,9 @@ class KredibelScraper:
         # Header attestasi browser (cf. kasus JobStreet): tanpa ini request
         # terlihat seperti "TLS browser tapi bisu", mudah di-flag WAF.
         # Versi diselaraskan dengan kredibel_user_agent (Chrome 153, Android).
+        # Referer + sec-fetch-site: same-origin meniru navigasi dari homepage
+        # (bukan deep-link tiba-tiba tanpa riwayat).
+        base = self.settings.kredibel_base_url.rstrip("/")
         return {
             "user-agent": self.settings.kredibel_user_agent,
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -231,9 +238,43 @@ class KredibelScraper:
             "sec-ch-ua-platform": '"Android"',
             "sec-fetch-dest": "document",
             "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
+            "sec-fetch-site": "same-origin",
+            "referer": base + "/",
             "upgrade-insecure-requests": "1",
         }
+
+    def _warm_up_homepage(self) -> None:
+        """Best-effort: GET homepage untuk cookie anonim + riwayat sesi
+        sebelum deep-link ke halaman nomor. Hanya jalan saat jar
+        benar-benar kosong (tanpa cookie .env maupun hasil request lama);
+        kegagalan diabaikan dan request detail tetap jalan."""
+        if self._active_cookies:
+            return
+        try:
+            import random
+            import time
+
+            from ..anti_ban import impersonated_session, iter_cookie_pairs, proxy_map
+
+            base = self.settings.kredibel_base_url.rstrip("/")
+            # Tanpa referer: kunjungan pertama = ketik URL / buka homepage.
+            headers = {
+                k: v for k, v in self._browser_headers().items()
+                if k.lower() != "referer"
+            }
+            session = impersonated_session(
+                headers=headers,
+                timeout=self.settings.kredibel_timeout_seconds,
+                proxies=proxy_map(self.settings.kredibel_proxy),
+            )
+            resp = session.get(base + "/", allow_redirects=True)
+            for name, value in iter_cookie_pairs(getattr(resp, "cookies", None)):
+                if name not in self._active_cookies:
+                    self._active_cookies[name] = value
+            # Jeda baca-klik ala manusia sebelum lanjut ke halaman nomor.
+            time.sleep(random.uniform(0.8, 2.0))
+        except Exception as exc:
+            logger.debug("Warm-up kredibel.com gagal (best-effort): %s", exc)
 
     def _fetch_via_curl(self, url: str, curl_path: str) -> Optional[dict[str, Any]]:
         from ..anti_ban import classify_ban
